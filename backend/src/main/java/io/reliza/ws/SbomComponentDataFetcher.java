@@ -3,11 +3,14 @@
 */
 package io.reliza.ws;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -115,25 +118,19 @@ public class SbomComponentDataFetcher {
 		return ra.compareTo(rb);
 	};
 
-	@PreAuthorize("isAuthenticated()")
-	@DgsData(parentType = "Query", field = "getReleaseSbomComponents")
-	public DataFetcherResult<List<Map<String, Object>>> getReleaseSbomComponents(
-			@InputArgument("releaseUuid") UUID releaseUuid) throws RelizaException {
-		JwtAuthenticationToken auth = (JwtAuthenticationToken) SecurityContextHolder.getContext().getAuthentication();
-		var oud = userService.getUserDataByAuth(auth);
-		Optional<ReleaseData> ord = sharedReleaseService.getReleaseData(releaseUuid);
-		RelizaObject ro = ord.isPresent() ? ord.get() : null;
-		authorizationService.isUserAuthorizedForObjectGraphQL(
-				oud.get(), PermissionFunction.RESOURCE, PermissionScope.RELEASE,
-				releaseUuid, List.of(ro), CallType.READ);
+	private record ReleaseGraphLoad(List<Map<String, Object>> dtos, ReleaseGraphContext ctx) {}
 
-		UUID orgUuid = ord.map(ReleaseData::getOrg).orElse(null);
+	/**
+	 * Build the per-request graph state used by both the full-release query
+	 * and the single-component graph query. Loads the release's rows once,
+	 * bulk-fetches every {@code sbom_components} row referenced by any row
+	 * or any parent edge, indexes rows by canonical component, and inverts
+	 * {@code parents} into a forward-edge map keyed by source uuid so the
+	 * downstream field resolvers are O(1) lookups instead of N+1 queries.
+	 */
+	private ReleaseGraphLoad loadReleaseGraph(UUID releaseUuid, UUID orgUuid) {
 		List<ReleaseSbomComponent> rows = sbomComponentService.listReleaseSbomComponents(releaseUuid);
 
-		// Bulk-load every sbom_components row referenced by any release row OR by
-		// any parent (in-edge) entry — covers both the `component` field and
-		// the targetCanonicalPurl resolution on forward edges. Scoped to the
-		// release's org since sbom_components is now per-org.
 		Set<UUID> referencedComponentIds = new HashSet<>();
 		for (ReleaseSbomComponent row : rows) {
 			referencedComponentIds.add(row.getSbomComponentUuid());
@@ -154,9 +151,6 @@ public class SbomComponentDataFetcher {
 			rowByComponentUuid.put(row.getSbomComponentUuid(), row);
 		}
 
-		// Invert parents (in-edges) into a forward index keyed by source uuid.
-		// One pass over rows builds every forward edge in the release; the
-		// `dependencies` resolver then becomes a single map lookup.
 		Map<UUID, List<Map<String, Object>>> forwardEdgesBySource = new HashMap<>();
 		for (ReleaseSbomComponent row : rows) {
 			List<Map<String, Object>> parents = row.getParents();
@@ -185,9 +179,68 @@ public class SbomComponentDataFetcher {
 		List<Map<String, Object>> dtos = rows.stream()
 				.map(SbomComponentDataFetcher::toDto)
 				.toList();
+		return new ReleaseGraphLoad(dtos, ctx);
+	}
+
+	@PreAuthorize("isAuthenticated()")
+	@DgsData(parentType = "Query", field = "getReleaseSbomComponents")
+	public DataFetcherResult<List<Map<String, Object>>> getReleaseSbomComponents(
+			@InputArgument("releaseUuid") UUID releaseUuid) throws RelizaException {
+		JwtAuthenticationToken auth = (JwtAuthenticationToken) SecurityContextHolder.getContext().getAuthentication();
+		var oud = userService.getUserDataByAuth(auth);
+		Optional<ReleaseData> ord = sharedReleaseService.getReleaseData(releaseUuid);
+		RelizaObject ro = ord.isPresent() ? ord.get() : null;
+		authorizationService.isUserAuthorizedForObjectGraphQL(
+				oud.get(), PermissionFunction.RESOURCE, PermissionScope.RELEASE,
+				releaseUuid, List.of(ro), CallType.READ);
+
+		UUID orgUuid = ord.map(ReleaseData::getOrg).orElse(null);
+		ReleaseGraphLoad load = loadReleaseGraph(releaseUuid, orgUuid);
 		return DataFetcherResult.<List<Map<String, Object>>>newResult()
-				.data(dtos)
-				.localContext(ctx)
+				.data(load.dtos())
+				.localContext(load.ctx())
+				.build();
+	}
+
+	/**
+	 * Single-component graph view: same merge semantics and field resolvers
+	 * as {@code getReleaseSbomComponents}, but returns just the merged row
+	 * for one canonical {@code sbom_components.uuid}. The graph page navigates
+	 * by stable {@code (releaseUuid, sbomComponentUuid)} without having to
+	 * fetch every row in the release and disambiguate client-side.
+	 *
+	 * <p>Returns null if the canonical component isn't present in the release
+	 * (or its dep tree, for product releases). The full release graph
+	 * {@link ReleaseGraphContext} is still attached as localContext so the
+	 * {@code dependencies} / {@code dependedOnBy} / {@code target} field
+	 * resolvers can resolve cross-component edges into other rows the page
+	 * may walk to.
+	 */
+	@PreAuthorize("isAuthenticated()")
+	@DgsData(parentType = "Query", field = "getReleaseSbomComponentGraph")
+	public DataFetcherResult<Map<String, Object>> getReleaseSbomComponentGraph(
+			@InputArgument("releaseUuid") UUID releaseUuid,
+			@InputArgument("sbomComponentUuid") UUID sbomComponentUuid) throws RelizaException {
+		JwtAuthenticationToken auth = (JwtAuthenticationToken) SecurityContextHolder.getContext().getAuthentication();
+		var oud = userService.getUserDataByAuth(auth);
+		Optional<ReleaseData> ord = sharedReleaseService.getReleaseData(releaseUuid);
+		RelizaObject ro = ord.isPresent() ? ord.get() : null;
+		authorizationService.isUserAuthorizedForObjectGraphQL(
+				oud.get(), PermissionFunction.RESOURCE, PermissionScope.RELEASE,
+				releaseUuid, List.of(ro), CallType.READ);
+
+		UUID orgUuid = ord.map(ReleaseData::getOrg).orElse(null);
+		ReleaseGraphLoad load = loadReleaseGraph(releaseUuid, orgUuid);
+		ReleaseSbomComponent target = load.ctx().rowByComponentUuid().get(sbomComponentUuid);
+		if (target == null) {
+			return DataFetcherResult.<Map<String, Object>>newResult()
+					.data(null)
+					.localContext(load.ctx())
+					.build();
+		}
+		return DataFetcherResult.<Map<String, Object>>newResult()
+				.data(toDto(target))
+				.localContext(load.ctx())
 				.build();
 	}
 
@@ -365,6 +418,51 @@ public class SbomComponentDataFetcher {
 		if (targetUuid == null) return null;
 		ReleaseSbomComponent row = ctx.rowByComponentUuid().get(targetUuid);
 		return row == null ? null : toDto(row);
+	}
+
+	/**
+	 * Transitive {@code dependedOnBy} closure, deduped, in BFS order from the
+	 * source row up. Walks the in-memory parent chain via the per-request
+	 * {@link ReleaseGraphContext} — no DB calls, no row re-fetch. Cycle-safe
+	 * via a visited set. Use to render multi-hop "upstream paths to root":
+	 * the returned ancestors carry their own {@code dependedOnBy}, {@code
+	 * component}, etc., so the UI can build path lists by walking one hop at
+	 * a time over this bounded subgraph instead of fetching the whole release.
+	 *
+	 * <p>Cost: O(V + E) over the ancestor subgraph per call, in memory. For
+	 * the single-component graph view this is fine. For a release-wide list,
+	 * selecting this on every row is O(rows × subgraph) — don't do that.
+	 */
+	@DgsData(parentType = "ReleaseSbomComponent", field = "ancestors")
+	public List<Map<String, Object>> getAncestors(DgsDataFetchingEnvironment dfe) {
+		ReleaseGraphContext ctx = dfe.getLocalContext();
+		if (ctx == null) return List.of();
+		UUID startUuid = extractUuid(dfe.getSource(), "sbomComponentUuid");
+		if (startUuid == null) return List.of();
+
+		Set<UUID> visited = new LinkedHashSet<>();
+		Deque<UUID> queue = new ArrayDeque<>();
+		queue.add(startUuid);
+		while (!queue.isEmpty()) {
+			UUID current = queue.poll();
+			ReleaseSbomComponent row = ctx.rowByComponentUuid().get(current);
+			if (row == null || row.getParents() == null) continue;
+			for (Map<String, Object> parentEntry : row.getParents()) {
+				if (parentEntry == null) continue;
+				UUID parentUuid = parseUuid(parentEntry.get("sourceSbomComponentUuid"));
+				if (parentUuid == null) continue;
+				if (parentUuid.equals(startUuid)) continue;
+				if (!visited.add(parentUuid)) continue;
+				queue.add(parentUuid);
+			}
+		}
+
+		List<Map<String, Object>> out = new ArrayList<>(visited.size());
+		for (UUID u : visited) {
+			ReleaseSbomComponent row = ctx.rowByComponentUuid().get(u);
+			if (row != null) out.add(toDto(row));
+		}
+		return out;
 	}
 
 	private static Map<String, Object> toDto(ReleaseSbomComponent row) {

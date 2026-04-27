@@ -53,7 +53,16 @@ type Query {
 	# artifactParticipations carries the list of artifacts that referenced this
 	# component and the exact (qualifier-carrying) purls each one used.
 	getReleaseSbomComponents(releaseUuid: ID!): [ReleaseSbomComponent]
-	
+
+	# Single-component graph view: the merged ReleaseSbomComponent row for
+	# (release, canonical sbom component), with the same dependencies /
+	# dependedOnBy resolvers as getReleaseSbomComponents. Returns null when
+	# the canonical component does not appear in the release (or its dep tree,
+	# for product releases). Use this from a graph-detail page to navigate by
+	# stable (releaseUuid, sbomComponentUuid) instead of scanning the full
+	# release set client-side.
+	getReleaseSbomComponentGraph(releaseUuid: ID!, sbomComponentUuid: ID!): ReleaseSbomComponent
+
 	configuredBaseIntegrations(org: ID!): [IntegrationType]
 	ciIntegrations(org: ID!): [CiIntegration]
 	
@@ -3148,6 +3157,15 @@ type ReleaseSbomComponent {
 	artifactParticipations: [SbomArtifactParticipation]
 	dependencies: [ReleaseSbomDependency]
 	dependedOnBy: [ReleaseSbomComponent]
+	# Transitive `dependedOnBy` closure (deduped, BFS order) for this component
+	# within the release. Use to render multi-hop "upstream paths to root":
+	# each ancestor's own `dependedOnBy` resolves against the same per-request
+	# graph context, so the UI can walk one hop at a time over this bounded
+	# subgraph instead of re-fetching the entire release. Computed in memory
+	# from the same context that drives `dependencies` / `dependedOnBy`, so
+	# selecting it adds no DB work — but it is per-row, so do not select on
+	# every row of a release-wide list.
+	ancestors: [ReleaseSbomComponent]
 	createdDate: DateTime
 	lastUpdatedDate: DateTime
 }

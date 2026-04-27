@@ -3,6 +3,7 @@
 */
 package io.reliza.service;
 
+import java.nio.charset.StandardCharsets;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collection;
@@ -446,6 +447,15 @@ public class SbomComponentService {
 		}
 
 		ReleaseSbomComponent merged = new ReleaseSbomComponent();
+		// Deterministic synthetic uuid derived from (productReleaseUuid,
+		// sbomComponentUuid). Without this, ReleaseSbomComponent's @Id default
+		// initializer hands out a fresh randomUUID on every merge call —
+		// breaking UI navigation that round-trips row.uuid through the URL,
+		// and churning Apollo's normalized cache (which keys on uuid) on every
+		// query against a product release. v5/name-based UUIDs occupy a
+		// different version-bit space than the v4 randomUUIDs used for real
+		// persisted rows, so synthetic ids cannot collide with persisted ones.
+		merged.setUuid(syntheticProductRowUuid(productReleaseUuid, sbomComponentUuid));
 		merged.setOrg(orgUuid);
 		merged.setReleaseUuid(productReleaseUuid);
 		merged.setSbomComponentUuid(sbomComponentUuid);
@@ -454,6 +464,11 @@ public class SbomComponentService {
 		if (earliestCreated != null) merged.setCreatedDate(earliestCreated);
 		if (latestUpdated != null) merged.setLastUpdatedDate(latestUpdated);
 		return merged;
+	}
+
+	private static UUID syntheticProductRowUuid(UUID productReleaseUuid, UUID sbomComponentUuid) {
+		String key = productReleaseUuid.toString() + ":" + sbomComponentUuid.toString();
+		return UUID.nameUUIDFromBytes(key.getBytes(StandardCharsets.UTF_8));
 	}
 
 	private static String declarationKey(Map<String, Object> declaration) {
