@@ -106,6 +106,7 @@ import io.reliza.model.tea.Rebom.RebomOptions;
 import io.reliza.model.tea.TeaIdentifier;
 import io.reliza.repositories.ReleaseRepository;
 import io.reliza.repositories.dao.DateCountDao;
+import io.reliza.versioning.VersionType;
 import io.reliza.service.RebomService.BomMediaType;
 import io.reliza.service.RebomService.BomStructureType;
 import io.reliza.service.oss.OssReleaseService;
@@ -1336,21 +1337,68 @@ public class ReleaseService {
 
 	public BranchData createFeatureSetFromRelease(String featureSetName, ReleaseData rd, UUID org, WhoUpdated wu) throws RelizaException{
 		ComponentData cd = getComponentService.getComponentData(rd.getComponent()).get();
+		// Use the component's featureBranchVersioning — the canonical schema
+		// for non-base branches — rather than the BASE versionSchema. Fall
+		// back to the FEATURE_BRANCH default (Branch.Micro) when the
+		// component has no setting (older components / migrations).
+		String featureSchema = StringUtils.isNotEmpty(cd.getFeatureBranchVersioning())
+				? cd.getFeatureBranchVersioning()
+				: VersionType.FEATURE_BRANCH.getSchema();
 		BranchData bd = BranchData.branchDataFromDbRecord(
 			branchService.createBranch(
-				featureSetName, cd, null, null, cd.getVersionSchema(), cd.getMarketingVersionSchema(), wu)
+				featureSetName, cd, null, null, featureSchema, cd.getMarketingVersionSchema(), wu)
 		);
 
+		// Inherit IGNORED / TRANSIENT status from the source release's branch
+		// (the parent feature set). IGNORED parent entries are also seeded
+		// even if they don't appear in the release's resolved dependencies —
+		// otherwise the "ignore this component" decision would silently drop
+		// off the new feature set, since unwindReleaseDependencies only sees
+		// components that were actually integrated. Anything else defaults to
+		// REQUIRED so the new feature set's dep set stays explicit.
+		Map<UUID, ChildComponent> parentByComponent = new HashMap<>();
+		if (null != rd.getBranch()) {
+			BranchData srcBd = branchService.getBranchData(rd.getBranch()).orElse(null);
+			if (srcBd != null && srcBd.getDependencies() != null) {
+				for (ChildComponent pc : srcBd.getDependencies()) {
+					if (pc == null || pc.getUuid() == null) continue;
+					if (pc.getStatus() == StatusEnum.IGNORED || pc.getStatus() == StatusEnum.TRANSIENT) {
+						parentByComponent.put(pc.getUuid(), pc);
+					}
+				}
+			}
+		}
+
 		Set<ReleaseData> components = sharedReleaseService.unwindReleaseDependencies(rd);
-		
-		List<ChildComponent> deps = components.stream().map(c -> {
-			return ChildComponent.builder()
+
+		List<ChildComponent> deps = new ArrayList<>();
+		Set<UUID> seenComponents = new HashSet<>();
+		for (ReleaseData c : components) {
+			ChildComponent parent = parentByComponent.get(c.getComponent());
+			StatusEnum status = parent != null ? parent.getStatus() : StatusEnum.REQUIRED;
+			deps.add(ChildComponent.builder()
 				.branch(c.getBranch())
 				.release(c.getUuid())
-				.status(StatusEnum.REQUIRED)
+				.status(status)
 				.uuid(c.getComponent())
-				.build();
-		}).toList();
+				.build());
+			seenComponents.add(c.getComponent());
+		}
+		// Pull in any IGNORED parent entries that didn't show up in the
+		// release's resolved deps so the ignore decision survives. Branch
+		// and isFollowVersion carry over for parity with the parent config;
+		// release is left null since the parent's pinned release belonged to
+		// the source feature set's lineage, not this new one.
+		for (ChildComponent parent : parentByComponent.values()) {
+			if (parent.getStatus() != StatusEnum.IGNORED) continue;
+			if (!seenComponents.add(parent.getUuid())) continue;
+			deps.add(ChildComponent.builder()
+				.uuid(parent.getUuid())
+				.branch(parent.getBranch())
+				.status(StatusEnum.IGNORED)
+				.isFollowVersion(parent.getIsFollowVersion())
+				.build());
+		}
 		BranchDto branchDto = BranchDto.builder()
 		.uuid(bd.getUuid())
 		.autoIntegrate(AutoIntegrateState.DISABLED)

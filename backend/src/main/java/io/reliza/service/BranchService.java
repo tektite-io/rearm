@@ -315,7 +315,20 @@ public class BranchService {
 		// if no vcs data or version data provided, use parent project settings
 		if (null == vcsRepoUuid || StringUtils.isEmpty(vcsBranch) || StringUtils.isEmpty(versionPin)) {
 			if (StringUtils.isEmpty(versionPin)) {
-				versionPin = cd.getVersionSchema();
+				// Component carries two schemas: versionSchema for the BASE
+				// branch and featureBranchVersioning for everything else. Pick
+				// the one that matches the type being created so non-base
+				// branches don't silently inherit the BASE branch's schema.
+				// For non-BASE branches, fall back to the FEATURE_BRANCH
+				// default (Branch.Micro) when the component has no setting —
+				// avoids creating a branch with an empty schema string.
+				if (type == BranchType.BASE) {
+					versionPin = cd.getVersionSchema();
+				} else {
+					versionPin = StringUtils.isNotEmpty(cd.getFeatureBranchVersioning())
+							? cd.getFeatureBranchVersioning()
+							: VersionType.FEATURE_BRANCH.getSchema();
+				}
 			}
 			if (null == vcsRepoUuid && cd.getType() == ComponentType.COMPONENT) {
 				vcsRepoUuid = cd.getVcs();
@@ -438,7 +451,12 @@ public class BranchService {
 				
 				// Now set the current branch to BASE
 				bd.setType(BranchType.BASE);
-			} else if (null != bd.getType() && BranchType.BASE != bd.getType()) {
+			} else if (null != branchDto.getType() && BranchType.BASE != bd.getType()) {
+				// Only overwrite an existing non-BASE type when the DTO
+				// actually carries a new type. Without the dto-null guard,
+				// any updateBranch call whose DTO omits `type` (e.g. the
+				// post-create dependency wiring in createFeatureSetFromRelease,
+				// or any UI partial update) silently clears the field.
 				bd.setType(branchDto.getType());
 			}
 				Map<String,Object> recordData = Utils.dataToRecord(bd);
