@@ -127,11 +127,13 @@ public class SbomComponentDataFetcher {
 				oud.get(), PermissionFunction.RESOURCE, PermissionScope.RELEASE,
 				releaseUuid, List.of(ro), CallType.READ);
 
+		UUID orgUuid = ord.map(ReleaseData::getOrg).orElse(null);
 		List<ReleaseSbomComponent> rows = sbomComponentService.listReleaseSbomComponents(releaseUuid);
 
 		// Bulk-load every sbom_components row referenced by any release row OR by
 		// any parent (in-edge) entry — covers both the `component` field and
-		// the targetCanonicalPurl resolution on forward edges.
+		// the targetCanonicalPurl resolution on forward edges. Scoped to the
+		// release's org since sbom_components is now per-org.
 		Set<UUID> referencedComponentIds = new HashSet<>();
 		for (ReleaseSbomComponent row : rows) {
 			referencedComponentIds.add(row.getSbomComponentUuid());
@@ -143,8 +145,9 @@ public class SbomComponentDataFetcher {
 				if (src != null) referencedComponentIds.add(src);
 			}
 		}
-		Map<UUID, SbomComponent> componentByUuid =
-				sbomComponentService.findSbomComponentsByIds(referencedComponentIds);
+		Map<UUID, SbomComponent> componentByUuid = orgUuid == null
+				? Map.of()
+				: sbomComponentService.findSbomComponentsByIds(referencedComponentIds, orgUuid);
 
 		Map<UUID, ReleaseSbomComponent> rowByComponentUuid = new HashMap<>(rows.size() * 2);
 		for (ReleaseSbomComponent row : rows) {
@@ -240,7 +243,7 @@ public class SbomComponentDataFetcher {
 					.collect(Collectors.toSet());
 		}
 
-		Set<UUID> releaseIds = sbomComponentService.findReleaseUuidsBySbomComponents(sbomComponentUuids);
+		Set<UUID> releaseIds = sbomComponentService.findReleaseUuidsBySbomComponents(sbomComponentUuids, orgUuid);
 		List<ComponentWithBranches> ret = sharedReleaseService.findReleaseDatasByReleaseIds(releaseIds, orgUuid);
 		if (null != perspectiveComponentUuids) {
 			ret = ret.stream()
@@ -282,9 +285,9 @@ public class SbomComponentDataFetcher {
 	/**
 	 * Native analogue of {@code searchDtrackComponentByPurlAndProjects}.
 	 * Canonicalizes the purl (strips qualifiers + subpath) and returns the
-	 * matching {@code sbom_components.uuid}, or null if none. The dtrack
-	 * version's {@code dtrackProjects} scope param has no analogue because
-	 * canonical purl is globally unique in {@code sbom_components}.
+	 * matching {@code sbom_components.uuid} within the caller's org, or null
+	 * if none. With per-org pinning canonical purl is unique per (org,
+	 * canonical_purl), so the org parameter is what scopes the lookup.
 	 */
 	@PreAuthorize("isAuthenticated()")
 	@DgsData(parentType = "Query", field = "searchSbomComponentByPurl")
@@ -296,7 +299,7 @@ public class SbomComponentDataFetcher {
 		var od = getOrganizationService.getOrganizationData(orgUuid);
 		RelizaObject ro = od.isPresent() ? od.get() : null;
 		authorizationService.isUserAuthorizedForObjectGraphQL(oud.get(), PermissionFunction.RESOURCE, PermissionScope.ORGANIZATION, orgUuid, List.of(ro), CallType.ESSENTIAL_READ);
-		return sbomComponentService.searchSbomComponentByPurl(purl);
+		return sbomComponentService.searchSbomComponentByPurl(purl, orgUuid);
 	}
 
 	@DgsData(parentType = "ReleaseSbomComponent", field = "component")

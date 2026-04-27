@@ -41,6 +41,9 @@ public class ReleaseSbomComponent implements Serializable, RelizaEntity {
 	private ZonedDateTime lastUpdatedDate = ZonedDateTime.now();
 
 	@Column(nullable = false)
+	private UUID org;
+
+	@Column(nullable = false)
 	private UUID releaseUuid;
 
 	@Column(nullable = false)
@@ -100,6 +103,14 @@ public class ReleaseSbomComponent implements Serializable, RelizaEntity {
 
 	public void setLastUpdatedDate(ZonedDateTime lastUpdatedDate) {
 		this.lastUpdatedDate = lastUpdatedDate;
+	}
+
+	public UUID getOrg() {
+		return org;
+	}
+
+	public void setOrg(UUID org) {
+		this.org = org;
 	}
 
 	public UUID getReleaseUuid() {

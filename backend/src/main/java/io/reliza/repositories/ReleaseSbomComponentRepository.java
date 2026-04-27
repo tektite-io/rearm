@@ -17,22 +17,33 @@ import io.reliza.model.ReleaseSbomComponent;
 
 public interface ReleaseSbomComponentRepository extends CrudRepository<ReleaseSbomComponent, UUID> {
 
-	List<ReleaseSbomComponent> findByReleaseUuid(UUID releaseUuid);
+	List<ReleaseSbomComponent> findByOrgAndReleaseUuid(UUID org, UUID releaseUuid);
 
-	List<ReleaseSbomComponent> findByReleaseUuidIn(Collection<UUID> releaseUuids);
+	List<ReleaseSbomComponent> findByOrgAndReleaseUuidIn(UUID org, Collection<UUID> releaseUuids);
 
-	Optional<ReleaseSbomComponent> findByReleaseUuidAndSbomComponentUuid(UUID releaseUuid, UUID sbomComponentUuid);
+	Optional<ReleaseSbomComponent> findByOrgAndReleaseUuidAndSbomComponentUuid(
+			UUID org, UUID releaseUuid, UUID sbomComponentUuid);
 
-	@Query("SELECT DISTINCT r.releaseUuid FROM ReleaseSbomComponent r WHERE r.sbomComponentUuid IN :sbomComponentUuids")
-	List<UUID> findDistinctReleaseUuidsBySbomComponentUuidIn(Collection<UUID> sbomComponentUuids);
+	/**
+	 * Org-scoped impact lookup: distinct release UUIDs (within {@code org})
+	 * whose release_sbom_components reference any of the supplied canonical
+	 * sbom_components. The org filter is a direct column match — no join.
+	 */
+	@Query("SELECT DISTINCT r.releaseUuid FROM ReleaseSbomComponent r "
+			+ "WHERE r.org = :org AND r.sbomComponentUuid IN :sbomComponentUuids")
+	List<UUID> findDistinctReleaseUuidsByOrgAndSbomComponentUuidIn(
+			UUID org, Collection<UUID> sbomComponentUuids);
 
 	@Modifying
 	@Transactional
-	@Query("DELETE FROM ReleaseSbomComponent r WHERE r.releaseUuid = :releaseUuid AND r.sbomComponentUuid NOT IN :keepComponentUuids")
-	int deleteByReleaseUuidAndSbomComponentUuidNotIn(UUID releaseUuid, Collection<UUID> keepComponentUuids);
+	@Query("DELETE FROM ReleaseSbomComponent r "
+			+ "WHERE r.org = :org AND r.releaseUuid = :releaseUuid "
+			+ "AND r.sbomComponentUuid NOT IN :keepComponentUuids")
+	int deleteByOrgAndReleaseUuidAndSbomComponentUuidNotIn(
+			UUID org, UUID releaseUuid, Collection<UUID> keepComponentUuids);
 
 	@Modifying
 	@Transactional
-	@Query("DELETE FROM ReleaseSbomComponent r WHERE r.releaseUuid = :releaseUuid")
-	int deleteAllByReleaseUuid(UUID releaseUuid);
+	@Query("DELETE FROM ReleaseSbomComponent r WHERE r.org = :org AND r.releaseUuid = :releaseUuid")
+	int deleteAllByOrgAndReleaseUuid(UUID org, UUID releaseUuid);
 }

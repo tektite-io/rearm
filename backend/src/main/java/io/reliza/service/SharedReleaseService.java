@@ -538,13 +538,24 @@ public class SharedReleaseService {
 	 * @return all transitive product releases, deduplicated by uuid.
 	 */
 	public Set<ReleaseData> locateAllProductsOfRelease(ReleaseData rd, Set<UUID> setToBreakCircles) {
+		return locateAllProductsOfRelease(rd, setToBreakCircles, null);
+	}
+
+	/**
+	 * Org-scoped variant of {@link #locateAllProductsOfRelease(ReleaseData, Set)}.
+	 * When {@code myOrg} is non-null the upward walk only surfaces products
+	 * owned by that org — important for impact-analysis on a seed release
+	 * that lives in the external/system sentinel org but whose bundling
+	 * products are in the caller's org.
+	 */
+	public Set<ReleaseData> locateAllProductsOfRelease(ReleaseData rd, Set<UUID> setToBreakCircles, UUID myOrg) {
 		Set<ReleaseData> products = new LinkedHashSet<>(
-				greedylocateProductsOfRelease(rd, null, false));
+				greedylocateProductsOfRelease(rd, myOrg, false));
 		if (products.isEmpty()) return products;
 		List<ReleaseData> ancestors = new ArrayList<>();
 		for (ReleaseData direct : products) {
 			if (setToBreakCircles.add(direct.getUuid())) {
-				ancestors.addAll(locateAllProductsOfRelease(direct, setToBreakCircles));
+				ancestors.addAll(locateAllProductsOfRelease(direct, setToBreakCircles, myOrg));
 			}
 		}
 		products.addAll(ancestors);

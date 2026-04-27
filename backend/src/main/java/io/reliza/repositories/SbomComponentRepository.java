@@ -16,27 +16,28 @@ import io.reliza.model.SbomComponent;
 
 public interface SbomComponentRepository extends CrudRepository<SbomComponent, UUID> {
 
-	Optional<SbomComponent> findByCanonicalPurl(String canonicalPurl);
+	Optional<SbomComponent> findByOrgAndCanonicalPurl(UUID org, String canonicalPurl);
 
 	@Query(
-		value = "SELECT * FROM rearm.sbom_components WHERE canonical_purl IN (:canonicalPurls)",
+		value = "SELECT * FROM rearm.sbom_components WHERE org = CAST(:orgUuidAsString AS uuid) AND canonical_purl IN (:canonicalPurls)",
 		nativeQuery = true)
-	List<SbomComponent> findByCanonicalPurlIn(Collection<String> canonicalPurls);
+	List<SbomComponent> findByOrgAndCanonicalPurlIn(
+			@Param("orgUuidAsString") String orgUuidAsString,
+			@Param("canonicalPurls") Collection<String> canonicalPurls);
 
 	/**
-	 * Search canonical sbom_components scoped to an org. sbom_components is
-	 * org-agnostic, so we narrow via release_sbom_components → releases.org.
-	 * Version filter is optional; pass null to match any version.
+	 * Search canonical sbom_components scoped to an org. With per-org pinning
+	 * the org filter is a direct column match — no join through
+	 * release_sbom_components. Version filter is optional; pass null to match
+	 * any version.
 	 */
 	@Query(
 		value = """
-			SELECT DISTINCT sc.*
-			FROM rearm.sbom_components sc
-			JOIN rearm.release_sbom_components rsc ON rsc.sbom_component_uuid = sc.uuid
-			JOIN rearm.releases r ON r.uuid = rsc.release_uuid
-			WHERE r.record_data->>'org' = :orgUuidAsString
-			AND sc.record_data->>'name' = :name
-			AND (CAST(:version AS text) IS NULL OR sc.record_data->>'version' = :version)
+			SELECT *
+			FROM rearm.sbom_components
+			WHERE org = CAST(:orgUuidAsString AS uuid)
+			AND record_data->>'name' = :name
+			AND (CAST(:version AS text) IS NULL OR record_data->>'version' = :version)
 		""",
 		nativeQuery = true)
 	List<SbomComponent> searchByOrgAndNameAndOptionalVersion(

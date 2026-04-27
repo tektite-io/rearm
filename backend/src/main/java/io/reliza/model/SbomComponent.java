@@ -40,6 +40,9 @@ public class SbomComponent implements Serializable, RelizaEntity {
 	private ZonedDateTime lastUpdatedDate = ZonedDateTime.now();
 
 	@Column(nullable = false)
+	private UUID org;
+
+	@Column(nullable = false)
 	private String canonicalPurl;
 
 	@Type(JsonBinaryType.class)
@@ -80,6 +83,14 @@ public class SbomComponent implements Serializable, RelizaEntity {
 
 	public void setLastUpdatedDate(ZonedDateTime lastUpdatedDate) {
 		this.lastUpdatedDate = lastUpdatedDate;
+	}
+
+	public UUID getOrg() {
+		return org;
+	}
+
+	public void setOrg(UUID org) {
+		this.org = org;
 	}
 
 	public String getCanonicalPurl() {
