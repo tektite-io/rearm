@@ -10,7 +10,7 @@
             <n-button v-if="releaseUuid" size="small" @click="reload" :loading="loading">Refresh</n-button>
         </div>
 
-        <div v-if="loading" style="padding: 24px;">
+        <div v-if="loading && !selected" style="padding: 24px;">
             <n-spin size="medium" />
             <p>{{ loadingMessage }}</p>
         </div>
@@ -40,14 +40,14 @@
             </p>
             <div v-else class="upstream-paths">
                 <div v-for="(path, idx) in upstreamPaths" :key="idx" class="upstream-path">
-                    <template v-for="(node, nodeIdx) in path" :key="node.uuid + ':' + nodeIdx">
+                    <template v-for="(node, nodeIdx) in path" :key="(node.sbomComponentUuid || '') + ':' + nodeIdx">
                         <span v-if="nodeIdx > 0" class="path-arrow">&larr;</span>
                         <span
                             class="path-box"
                             :class="{ 'is-root': node.component?.isRoot, 'is-self': nodeIdx === 0 }"
                             :title="node.component?.canonicalPurl || ''"
-                            @click="navigateToRow(node.uuid)">
-                            {{ nodeLabel(node) }}
+                            @click="navigateToComponent(node.sbomComponentUuid)">
+                            {{ pathNodeLabel(node) }}
                         </span>
                     </template>
                 </div>
@@ -76,7 +76,7 @@
                 v-else
                 :data="selected.dependedOnBy"
                 :columns="dependedOnByColumns"
-                :row-key="(row: any) => row.uuid"
+                :row-key="(row: any) => (row.sbomComponentUuid || row.uuid)"
                 :pagination="{ pageSize: 10 }"
             />
         </div>
@@ -97,34 +97,23 @@ import { NButton, NDataTable, NSpin, NTag, NTooltip, type DataTableColumns } fro
 
 interface Props {
     releaseUuid: string
-    componentUuid?: string
+    sbomComponentUuid?: string
     purl?: string
     orgUuid?: string
 }
 
 const props = withDefaults(defineProps<Props>(), {
-    componentUuid: '',
+    sbomComponentUuid: '',
     purl: '',
     orgUuid: ''
 })
 
 const router = useRouter()
 
-const MAX_PATHS = 50
-
 const loading: Ref<boolean> = ref(false)
 const loadingMessage: Ref<string> = ref('Loading dependency graph...')
 const errorMessage: Ref<string> = ref('')
-// Per-release cache of the loaded graph: releaseUuid -> { byUuid }.
-const graphCache: Ref<Record<string, { byUuid: Record<string, any> }>> = ref({})
-const currentReleaseUuid: Ref<string> = ref('')
-const selectedUuid: Ref<string> = ref('')
-
-const byUuid: ComputedRef<Record<string, any>> = computed(() =>
-    graphCache.value[currentReleaseUuid.value]?.byUuid || {}
-)
-
-const selected: ComputedRef<any> = computed(() => byUuid.value[selectedUuid.value] || null)
+const selected: Ref<any> = ref(null)
 
 const pageTitle: ComputedRef<string> = computed(() => {
     const c = selected.value?.component
@@ -133,62 +122,68 @@ const pageTitle: ComputedRef<string> = computed(() => {
     return `SBOM Component Graph — ${c.name || c.canonicalPurl || 'component'}${v}`
 })
 
-function nodeLabel (row: any): string {
-    const c = row?.component
-    if (!c) return row?.uuid || '—'
-    return c.canonicalPurl || `${c.name || ''}${c.version ? '@' + c.version : ''}` || row.uuid
-}
+const GRAPH_QUERY = gql`
+    query getReleaseSbomComponentGraph($releaseUuid: ID!, $sbomComponentUuid: ID!) {
+        getReleaseSbomComponentGraph(releaseUuid: $releaseUuid, sbomComponentUuid: $sbomComponentUuid) {
+            uuid
+            sbomComponentUuid
+            releaseUuid
+            component { uuid canonicalPurl type group name version isRoot }
+            artifactParticipations { artifact exactPurls }
+            dependencies {
+                targetSbomComponentUuid
+                targetCanonicalPurl
+                relationshipType
+                target {
+                    uuid
+                    sbomComponentUuid
+                    component { canonicalPurl name version }
+                }
+                declaringArtifacts { artifact sourceExactPurl targetExactPurl }
+            }
+            dependedOnBy {
+                uuid
+                sbomComponentUuid
+                component { canonicalPurl name version }
+            }
+            # Transitive dependedOnBy closure delivered as a flat, BFS-ordered
+            # list. Used purely for client-side upstream-path walking — only
+            # selecting the minimum: identity + immediate parent refs.
+            ancestors {
+                uuid
+                sbomComponentUuid
+                component { canonicalPurl name version isRoot }
+                dependedOnBy { sbomComponentUuid }
+            }
+        }
+    }
+`
 
-const forceRefetchReleases: Ref<Set<string>> = ref(new Set())
+const MAX_PATHS = 50
 
-async function ensureGraphLoaded (releaseUuid: string): Promise<boolean> {
-    if (!releaseUuid) return false
-    const forceRefetch = forceRefetchReleases.value.has(releaseUuid)
-    if (graphCache.value[releaseUuid] && !forceRefetch) return true
+async function fetchGraph (releaseUuid: string, sbomComponentUuid: string, useNetworkOnly = false) {
     loading.value = true
-    loadingMessage.value = 'Loading release dependency graph...'
+    loadingMessage.value = 'Loading dependency graph...'
+    errorMessage.value = ''
     try {
         const resp = await graphqlClient.query({
-            query: gql`
-                query getReleaseSbomComponentsGraph($releaseUuid: ID!) {
-                    getReleaseSbomComponents(releaseUuid: $releaseUuid) {
-                        uuid
-                        sbomComponentUuid
-                        component { uuid canonicalPurl type group name version isRoot }
-                        dependencies {
-                            targetSbomComponentUuid
-                            targetCanonicalPurl
-                            relationshipType
-                            target {
-                                uuid
-                                sbomComponentUuid
-                                component { canonicalPurl name version }
-                            }
-                            declaringArtifacts { artifact sourceExactPurl targetExactPurl }
-                        }
-                        dependedOnBy {
-                            uuid
-                            sbomComponentUuid
-                            component { canonicalPurl name version }
-                        }
-                    }
-                }`,
-            variables: { releaseUuid },
-            fetchPolicy: forceRefetch ? 'network-only' : 'cache-first'
+            query: GRAPH_QUERY,
+            variables: { releaseUuid, sbomComponentUuid },
+            // cache-and-network: render any cached row immediately, then refresh
+            // from the server. The merged row uuid is deterministic (v3 of
+            // releaseUuid + sbomComponentUuid) so cache identity is stable.
+            fetchPolicy: useNetworkOnly ? 'network-only' : 'cache-and-network'
         })
-        const rows: any[] = (resp.data as any)?.getReleaseSbomComponents || []
-        const map: Record<string, any> = {}
-        rows.forEach((r: any) => { map[r.uuid] = r })
-        graphCache.value = { ...graphCache.value, [releaseUuid]: { byUuid: map } }
-        if (forceRefetch) {
-            const next = new Set(forceRefetchReleases.value)
-            next.delete(releaseUuid)
-            forceRefetchReleases.value = next
+        const row = (resp.data as any)?.getReleaseSbomComponentGraph
+        if (!row) {
+            selected.value = null
+            errorMessage.value = 'This component is not present in the release SBOM.'
+            return
         }
-        return true
+        selected.value = row
     } catch (err: any) {
         errorMessage.value = err?.message || 'Failed to load release SBOM graph.'
-        return false
+        selected.value = null
     } finally {
         loading.value = false
     }
@@ -200,122 +195,129 @@ async function resolveSelection () {
         errorMessage.value = 'No release context provided.'
         return
     }
-    currentReleaseUuid.value = props.releaseUuid
-    const loaded = await ensureGraphLoaded(props.releaseUuid)
-    if (!loaded) return
 
-    let targetUuid = props.componentUuid
-    if (!targetUuid && props.purl) {
+    let sbomUuid = props.sbomComponentUuid
+    if (!sbomUuid && props.purl) {
         loading.value = true
         loadingMessage.value = 'Resolving purl...'
         try {
-            const orgUuid = props.orgUuid
-            if (!orgUuid) {
+            if (!props.orgUuid) {
                 errorMessage.value = 'No organization context provided for purl lookup.'
                 return
             }
-            const sbomUuid = await searchSbomComponentByPurl(orgUuid, props.purl)
-            if (!sbomUuid) {
+            const resolved = await searchSbomComponentByPurl(props.orgUuid, props.purl)
+            if (!resolved) {
                 errorMessage.value = `No SBOM component found for purl "${props.purl}".`
                 return
             }
-            targetUuid = sbomUuid
+            sbomUuid = resolved
         } finally {
             loading.value = false
         }
     }
 
-    if (!targetUuid) {
+    if (!sbomUuid) {
         errorMessage.value = 'No component identifier provided.'
         return
     }
 
-    // The release_sbom_components row UUID and the canonical sbom_components.uuid
-    // are different. Match by either so callers can pass whichever they have.
-    let row = byUuid.value[targetUuid]
-    if (!row) {
-        row = Object.values(byUuid.value).find((r: any) =>
-            r.sbomComponentUuid === targetUuid ||
-            r.component?.uuid === targetUuid
-        )
-    }
-    if (!row) {
-        errorMessage.value = 'This component is not present in the release SBOM yet (it may be pending reconcile).'
-        return
-    }
-    selectedUuid.value = row.uuid
+    await fetchGraph(props.releaseUuid, sbomUuid)
 }
 
-function navigateToRow (rowUuid: string) {
-    if (!byUuid.value[rowUuid]) return
+function navigateToComponent (sbomComponentUuid: string) {
+    if (!sbomComponentUuid) return
     router.push({
         name: 'SbomComponentGraph',
-        params: { releaseUuid: props.releaseUuid, componentUuid: rowUuid }
+        params: { releaseUuid: props.releaseUuid, sbomComponentUuid }
     })
 }
 
 function reload () {
     if (!props.releaseUuid) return
-    const next = new Set(forceRefetchReleases.value)
-    next.add(props.releaseUuid)
-    forceRefetchReleases.value = next
-    const evicted = { ...graphCache.value }
-    delete evicted[props.releaseUuid]
-    graphCache.value = evicted
-    resolveSelection()
+    if (props.sbomComponentUuid) {
+        fetchGraph(props.releaseUuid, props.sbomComponentUuid, true)
+    } else {
+        resolveSelection()
+    }
 }
 
-watch(() => [props.releaseUuid, props.componentUuid, props.purl, props.orgUuid] as const, () => {
-    selectedUuid.value = ''
+watch(() => [props.releaseUuid, props.sbomComponentUuid, props.purl, props.orgUuid] as const, () => {
+    selected.value = null
     resolveSelection()
 }, { immediate: true })
 
-// Upstream paths: walk dependedOnBy upward to find each distinct path that
-// terminates at a root (or at a node with no further parents). Cycles are
-// stopped at the first repeat in the current path. Capped at MAX_PATHS.
+// Upstream paths: walk dependedOnBy upward through the ancestors map, emit
+// each distinct path that terminates at a root or a parent outside the
+// ancestor set. Cycles are broken at the first repeated hop. Capped at
+// MAX_PATHS so high-fanout DAGs don't explode the render.
 const upstreamTruncated: Ref<boolean> = ref(false)
 const upstreamPaths: ComputedRef<any[][]> = computed((): any[][] => {
     upstreamTruncated.value = false
-    if (!selected.value) return []
-    const start = selected.value
-    if (start.component?.isRoot) return []
+    const root = selected.value
+    if (!root) return []
+    if (root.component?.isRoot) return []
+    const ancestors: any[] = root.ancestors || []
+    if (!ancestors.length) return []
 
-    const map = byUuid.value
+    const byUuid = new Map<string, any>()
+    ancestors.forEach((a: any) => { if (a.sbomComponentUuid) byUuid.set(a.sbomComponentUuid, a) })
+
+    const startKey = root.sbomComponentUuid
+    const startNode = {
+        sbomComponentUuid: startKey,
+        component: root.component,
+        dependedOnBy: (root.dependedOnBy || []).map((p: any) => ({ sbomComponentUuid: p.sbomComponentUuid }))
+    }
+
     const paths: any[][] = []
-    const stack: { row: any; path: any[]; ancestors: Set<string> }[] = [
-        { row: start, path: [start], ancestors: new Set([start.uuid]) }
+    let truncated = false
+
+    const stack: { node: any; path: any[]; visited: Set<string> }[] = [
+        { node: startNode, path: [], visited: new Set([startKey]) }
     ]
 
-    while (stack.length && paths.length < MAX_PATHS) {
+    while (stack.length) {
+        if (paths.length >= MAX_PATHS) {
+            truncated = true
+            break
+        }
         const frame = stack.pop()!
-        const parents = frame.row.dependedOnBy || []
-        const isRoot = frame.row.component?.isRoot
-        const noParents = parents.length === 0
-        if (frame.path.length > 1 && (isRoot || noParents)) {
-            paths.push(frame.path)
+        const next = [...frame.path, frame.node]
+        const isRoot = frame.node.component?.isRoot
+        const parentRefs = frame.node.dependedOnBy || []
+        if (isRoot || parentRefs.length === 0) {
+            paths.push(next)
             continue
         }
-        if (noParents) continue
-        for (const p of parents) {
-            const parentRow = map[p.uuid]
-            if (!parentRow) continue
-            if (frame.ancestors.has(parentRow.uuid)) {
-                paths.push([...frame.path, parentRow])
+        for (const ref of parentRefs) {
+            const parentKey = ref?.sbomComponentUuid
+            if (!parentKey) continue
+            if (frame.visited.has(parentKey)) {
+                // cycle — terminate the path here
+                paths.push(next)
                 continue
             }
-            const nextAncestors = new Set(frame.ancestors)
-            nextAncestors.add(parentRow.uuid)
-            stack.push({
-                row: parentRow,
-                path: [...frame.path, parentRow],
-                ancestors: nextAncestors
-            })
+            const parent = byUuid.get(parentKey)
+            if (!parent) {
+                // parent outside ancestor set — treat as terminal
+                paths.push(next)
+                continue
+            }
+            const nextVisited = new Set(frame.visited)
+            nextVisited.add(parentKey)
+            stack.push({ node: parent, path: next, visited: nextVisited })
         }
     }
 
-    if (stack.length) upstreamTruncated.value = true
+    upstreamTruncated.value = truncated
     return paths
 })
+
+function pathNodeLabel (node: any): string {
+    const c = node?.component
+    if (!c) return node?.sbomComponentUuid || '—'
+    return c.canonicalPurl || `${c.name || ''}${c.version ? '@' + c.version : ''}` || node.sbomComponentUuid
+}
 
 function renderRowRef (component: any, fallbackPurl?: string) {
     const purl = component?.canonicalPurl || fallbackPurl
@@ -360,12 +362,12 @@ const dependenciesColumns: DataTableColumns<any> = [
         key: 'actions',
         title: '',
         render: (row: any) => {
-            const targetUuid = row.target?.uuid
-            if (!targetUuid || !byUuid.value[targetUuid]) return h('span', '')
+            const targetSbomUuid = row.target?.sbomComponentUuid || row.targetSbomComponentUuid
+            if (!targetSbomUuid) return h('span', '')
             return h(NButton, {
                 size: 'tiny',
                 tertiary: true,
-                onClick: () => navigateToRow(targetUuid)
+                onClick: () => navigateToComponent(targetSbomUuid)
             }, () => 'Open')
         }
     }
@@ -381,11 +383,12 @@ const dependedOnByColumns: DataTableColumns<any> = [
         key: 'actions',
         title: '',
         render: (row: any) => {
-            if (!byUuid.value[row.uuid]) return h('span', '')
+            const parentSbomUuid = row.sbomComponentUuid || row.component?.uuid
+            if (!parentSbomUuid) return h('span', '')
             return h(NButton, {
                 size: 'tiny',
                 tertiary: true,
-                onClick: () => navigateToRow(row.uuid)
+                onClick: () => navigateToComponent(parentSbomUuid)
             }, () => 'Open')
         }
     }

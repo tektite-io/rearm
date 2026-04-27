@@ -2235,10 +2235,14 @@ async function ensureSbomGraphLoaded (forceRefresh: boolean = false) {
 }
 
 function openSbomComponentGraph (row: any) {
-    if (!updatedRelease.value?.uuid || !row?.uuid) return
+    if (!updatedRelease.value?.uuid || !row) return
+    // The path param is the canonical sbom_components.uuid — stable across the
+    // list / graph / per-component resolvers regardless of release type.
+    const sbomComponentUuid = row.sbomComponentUuid || row.component?.uuid
+    if (!sbomComponentUuid) return
     const href = router.resolve({
         name: 'SbomComponentGraph',
-        params: { releaseUuid: updatedRelease.value.uuid, componentUuid: row.uuid }
+        params: { releaseUuid: updatedRelease.value.uuid, sbomComponentUuid }
     }).href
     window.open(href, '_blank')
 }
