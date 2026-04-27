@@ -147,6 +147,11 @@ public class CommonVariables {
 	public static final String NAMESPACE_FIELD = "namespace";
 	public static final String CLUSTER_WIDE_NAMESPACE = "CLUSTER--WIDE";
 	public static final String DEFAULT_NAMESPACE = "default";
+	// Sentinel namespace for the embedded ReARM CD runtime — when a CLUSTER
+	// api key sends data or asks for a BOM scoped to this namespace and we
+	// can't resolve a child instance for it, we fall back to the
+	// hard-coded ReARM CD BOM in Utils.getHardCodedRearmCdBomJson().
+	public static final String REARM_CD_NAMESPACE = "rearm-cd";
 	public static final String DEFAULT_CONFIGURATION = "default";
 	public static final String DEFAULT_SENDER_ID = "default";
 	public static final String IMAGES_FIELD = "images";

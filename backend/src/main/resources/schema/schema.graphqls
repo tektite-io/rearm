@@ -164,6 +164,12 @@ type Query {
 	isInstanceHasSealedSecretCert(instanceUuid: ID, instanceUri: String): Boolean
 	getInstancePropSecrets(instanceUuid: ID, instanceUri: String, namespace: String!, revision: Int!, properties: [String], secrets: [String], product: ID, productSpecificProps: Boolean): PropSecrets
 	deliverableDownloadSecrets(instanceUuid: ID, instanceUri: String, deliverableDigest: String!, namespace: String, releaseNs: String): ComponentAuthentication
+	# Per-product feature-set inventory of an instance plan, scoped to a
+	# namespace. FREEFORM-only; requires DEVOPS_READ on the instance (or
+	# its parent cluster). namespace is required for STANDALONE_INSTANCE
+	# and CLUSTER instances; for CLUSTER_INSTANCE it is pinned to the
+	# instance's own namespace and any value passed is ignored.
+	listInstanceProductFeatureSets(instanceUuid: ID!, namespace: String): [InstanceProductFeatureSets!]!
 
 	# properties
 	property(propertyUuid: ID!): Property
@@ -373,6 +379,15 @@ type Mutation {
 	instData(instance: InstanceDataInput!): Object
 	archiveInstance(instanceUuid: ID!): Boolean
 	setInstanceSealedSecretCert(sealedCert: String!): Boolean
+	# Switch a deployed product on the instance plan from its current
+	# feature set to a different one (the new feature set must belong to
+	# the same product). FREEFORM-only; requires DEVOPS_WRITE on the
+	# instance (or its parent cluster). namespace is required for
+	# STANDALONE_INSTANCE and CLUSTER instances (the (product, namespace)
+	# pair uniquely identifies a deployment on the plan); for
+	# CLUSTER_INSTANCE it is pinned to the instance's own namespace and
+	# any value passed is ignored.
+	switchInstanceProductFeatureSet(instanceUuid: ID!, productUuid: ID!, featureSetUuid: ID!, namespace: String): Instance
 
 	# properties
 	createProperty(property: PropertyInput!): Property
@@ -2288,6 +2303,8 @@ enum PermissionFunction {
 	ARTIFACT_DOWNLOAD
 	SBOM_PROBING
 	LIFECYCLE_UPDATE
+	DEVOPS_READ
+	DEVOPS_WRITE
 }
 
 enum SbomProbingStatus {
@@ -2722,6 +2739,21 @@ type InstanceProductMapPlan {
 	identifier: String
 	configuration: String
 	alertsEnabled: Boolean
+}
+
+# Per-product slice of an instance plan: which feature set is currently
+# deployed and which alternatives the caller could switch to. Returned
+# by listInstanceProductFeatureSets.
+type InstanceProductFeatureSets {
+	namespace: String
+	product: NamedRef!
+	currentFeatureSet: NamedRef
+	availableFeatureSets: [NamedRef!]!
+}
+
+type NamedRef {
+	uuid: ID!
+	name: String!
 }
 
 type InstanceProductMapActual {

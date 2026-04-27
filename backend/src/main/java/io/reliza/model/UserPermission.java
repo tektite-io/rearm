@@ -84,9 +84,17 @@ public class UserPermission {
 		FINDING_ANALYSIS_WRITE,
 		ARTIFACT_DOWNLOAD,
 		SBOM_PROBING, // allows to upload temp sbom to dtrack to get stats on it without creating project or anything (or if deduped, retrieve from existing project)
-		LIFECYCLE_UPDATE
+		LIFECYCLE_UPDATE,
+		// DEVOPS_READ / DEVOPS_WRITE gate every instance and cluster
+		// surface (data fetchers under ws/saas/InstanceDataFetcher and the
+		// inbound instData write path). Required for both manual (user)
+		// and FREEFORM key auth; INSTANCE/CLUSTER api keys are bound by
+		// objectUuid and don't carry function-level permissions, so the
+		// devops gate is implicit for them.
+		DEVOPS_READ,
+		DEVOPS_WRITE
 		;
-		
+
 		private PermissionFunction () {}
 	}
 	
