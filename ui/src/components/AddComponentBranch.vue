@@ -169,7 +169,11 @@ const onOrgChange = function () {
 
 const onComponentChange = function (componentId: string) {
     featureSetObj.value.featureSet = ''
-    store.dispatch('fetchBranches', componentId)
+    // Force a network refresh so the dropdown reflects feature sets created /
+    // renamed since the last cached fetch. Triggered both by switching the
+    // parent product and by the initial setup when this modal opens to edit
+    // an existing integration.
+    store.dispatch('fetchBranches', { componentId, forceRefresh: true })
 }
 
 const featureSetObj = ref({
