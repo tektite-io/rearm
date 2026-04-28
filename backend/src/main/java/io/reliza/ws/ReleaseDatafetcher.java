@@ -54,6 +54,7 @@ import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.common.CommonVariables.TagRecord;
 import io.reliza.common.Utils.ArtifactBelongsTo;
 import io.reliza.common.Utils.StripBom;
+import io.reliza.common.SidPurlUtils;
 import io.reliza.common.Utils;
 import io.reliza.common.VcsType;
 
@@ -1124,17 +1125,16 @@ public class ReleaseDatafetcher {
 		UUID artId = null;
 
 		String purl = null;
-		Optional<TeaIdentifier> purlId = Optional.empty();
 		if(ArtifactBelongsTo.DELIVERABLE.equals(belongsTo) && artifactInput.containsKey("deliverable")){
 			UUID deliverableId = UUID.fromString((String)artifactInput.get("deliverable"));
 			DeliverableData dd = getDeliverableService.getDeliverableData(deliverableId).get();
-			if (null != dd.getIdentifiers()) purlId = dd.getIdentifiers().stream().filter(id -> id.getIdType() == TeaIdentifierType.PURL).findFirst();
-			if (purlId.isPresent()) purl = purlId.get().getIdValue();
+			purl = SidPurlUtils.pickPreferredPurl(dd.getIdentifiers())
+					.map(TeaIdentifier::getIdValue).orElse(null);
 		} else if(ArtifactBelongsTo.SCE.equals(belongsTo) && artifactInput.containsKey("sce")){
 			// TODO purl for sce
 		} else { // belongs to release
-			if (null != ord.get().getIdentifiers()) purlId = ord.get().getIdentifiers().stream().filter(id -> id.getIdType() == TeaIdentifierType.PURL).findFirst();
-			if (purlId.isPresent()) purl = purlId.get().getIdValue();
+			purl = SidPurlUtils.pickPreferredPurl(ord.get().getIdentifiers())
+					.map(TeaIdentifier::getIdValue).orElse(null);
 		}
 
 		if (multipartFile != null) {

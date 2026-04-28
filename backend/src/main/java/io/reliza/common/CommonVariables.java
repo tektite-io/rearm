@@ -714,4 +714,29 @@ public class CommonVariables {
 		INHERIT;
 	}
 
+	/**
+	 * Org-level mode for sid (Software IDentification) PURL emission.
+	 * DISABLED: no sid PURLs emitted; tenant-supplied pkg:sid/... values pass through unchanged.
+	 * ENABLED_STRICT: sid emitted org-wide; component/perspective overrides not honored.
+	 * ENABLED_FLEXIBLE: sid emitted org-wide, but components and (SaaS) perspectives may override
+	 *   the per-component decision and supply their own authority.
+	 */
+	public enum SidPurlMode {
+		DISABLED,
+		ENABLED_STRICT,
+		ENABLED_FLEXIBLE;
+	}
+
+	/**
+	 * Component- and perspective-level sid override.
+	 * Only meaningful — and only writeable — when the org is in ENABLED_FLEXIBLE mode.
+	 * INHERIT: defer to higher level; ENABLE: opt-in for this component/perspective;
+	 * DISABLE: opt-out for this component/perspective.
+	 */
+	public enum SidPurlOverride {
+		INHERIT,
+		ENABLE,
+		DISABLE;
+	}
+
 }

@@ -17,6 +17,7 @@ import com.fasterxml.jackson.databind.JsonMappingException;
 
 import io.reliza.common.CommonVariables;
 import io.reliza.common.CommonVariables.BranchSuffixMode;
+import io.reliza.common.CommonVariables.SidPurlOverride;
 import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.model.ComponentData.ComponentAuthentication;
 import io.reliza.model.ComponentData.ComponentKind;
@@ -25,6 +26,7 @@ import io.reliza.model.ComponentData.EventType;
 import io.reliza.model.ComponentData.GlobalInputEventRef;
 import io.reliza.model.ComponentData.ReleaseInputEvent;
 import io.reliza.model.ComponentData.ReleaseOutputEvent;
+import io.reliza.model.DeliverableData.BelongsToOrganization;
 import io.reliza.model.IntegrationData.IntegrationType;
 import io.reliza.model.ReleaseData.ReleaseLifecycle;
 import io.reliza.model.VersionAssignment.VersionTypeEnum;
@@ -111,6 +113,18 @@ public class UpdateComponentDto {
 	@JsonProperty
 	private BranchSuffixMode branchSuffixMode;
 
+	/** Null = unchanged; INHERIT = clear override. */
+	@JsonProperty
+	private SidPurlOverride sidPurlOverride;
+
+	/** Null = unchanged. */
+	@JsonProperty
+	private List<String> sidAuthoritySegments;
+
+	/** Null = unchanged. */
+	@JsonProperty
+	private BelongsToOrganization isInternal;
+
 	public static ReleaseOutputEvent convertReleaseOutputEventFromInput (ReleaseOutputEventInput roei,
 			IntegrationType it) throws JsonMappingException, JsonProcessingException {
 		var builder = ReleaseOutputEvent.builder()
@@ -173,6 +187,9 @@ public class UpdateComponentDto {
 								.identifiers(ucd.getIdentifiers())
 								.authentication(ucd.getAuthentication())
 								.branchSuffixMode(ucd.getBranchSuffixMode())
+								.sidPurlOverride(ucd.getSidPurlOverride())
+								.sidAuthoritySegments(ucd.getSidAuthoritySegments())
+								.isInternal(ucd.getIsInternal())
 								.build();
 		return cdto;
 	}

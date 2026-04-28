@@ -325,7 +325,7 @@ public class VersionAssignmentTest
 		Organization org = testInitializer.obtainOrganization();
 		OrganizationData.Settings orgPatch = new OrganizationData.Settings();
 		orgPatch.setBranchSuffixMode(BranchSuffixMode.INHERIT);
-		Assertions.assertThrows(IllegalArgumentException.class, () ->
+		Assertions.assertThrows(RelizaException.class, () ->
 			organizationService.updateSettings(org.getUuid(), orgPatch, WhoUpdated.getTestWhoUpdated())
 		);
 	}

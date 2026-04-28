@@ -23,6 +23,8 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import io.reliza.common.CommonVariables;
+import io.reliza.common.CommonVariables.SidPurlMode;
+import io.reliza.common.CommonVariables.SidPurlOverride;
 import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.common.CommonVariables.TableName;
 import io.reliza.common.CommonVariables.VisibilitySetting;
@@ -36,6 +38,8 @@ import io.reliza.model.BranchData.BranchType;
 import io.reliza.model.Component;
 import io.reliza.model.ComponentData;
 import io.reliza.model.ComponentData.DefaultBranchName;
+import io.reliza.model.DeliverableData.BelongsToOrganization;
+import io.reliza.model.OrganizationData;
 import io.reliza.model.VersionAssignment.VersionTypeEnum;
 import io.reliza.model.ComponentData.ComponentKind;
 import io.reliza.model.ComponentData.ComponentType;
@@ -69,6 +73,12 @@ public class ComponentService {
 	
 	@Autowired
     private ApiKeyService apiKeyService;
+
+	@Autowired
+	private GetOrganizationService getOrganizationService;
+
+	@Autowired
+	private SidPurlResolver sidPurlResolver;
 
 	private static final Logger log = LoggerFactory.getLogger(ComponentService.class);
 			
@@ -247,10 +257,16 @@ public class ComponentService {
 		}
 		
 		if (null == cpd.getKind()) cpd.setKind(ComponentKind.GENERIC);
-		
+
+		validateSidOverrideAgainstOrg(cpd.getOrganization(), cpd.getSidPurlOverride());
+
 		ComponentData cd = ComponentData.componentDataFactory(cpd);
 		cd.setUuid(p.getUuid());
-		
+
+		// sidPurl collision check before any side-effecting work (branch creation, save) so
+		// a rejected create leaves no orphan rows behind.
+		checkSidCollision(cd, null);
+
 		// when creating a Component, always create a base branch
 		DefaultBranchName dbn = DefaultBranchName.MAIN;
 		if (cpd.getDefaultBranch() != null) {
@@ -337,6 +353,39 @@ public class ComponentService {
 				cd.setBranchSuffixMode(cdto.getBranchSuffixMode() == io.reliza.common.CommonVariables.BranchSuffixMode.INHERIT
 						? null : cdto.getBranchSuffixMode());
 			}
+			if (null != cdto.getSidPurlOverride()) {
+				SidPurlOverride incoming = cdto.getSidPurlOverride();
+				// Normalize INHERIT → null so we can compare against the stored value, which
+				// the factory and update path both keep null-canonicalized.
+				SidPurlOverride normalized = incoming == SidPurlOverride.INHERIT ? null : incoming;
+				// Only enforce org-mode policy when the override is actually changing.
+				// Otherwise a saved-when-FLEXIBLE component can never be edited again
+				// after the org flips to STRICT/DISABLED — the dto sends the stored override
+				// on every save, and validateSidOverrideAgainstOrg would reject it.
+				if (!java.util.Objects.equals(normalized, cd.getSidPurlOverride())) {
+					validateSidOverrideAgainstOrg(cd.getOrg(), incoming);
+				}
+				cd.setSidPurlOverride(normalized);
+			}
+			if (null != cdto.getSidAuthoritySegments()) {
+				List<String> segments = cdto.getSidAuthoritySegments();
+				// Validate non-empty segments (symmetry with applySidPurlPatch and
+				// PerspectiveService.updateSidPurl); empty list clears.
+				if (!segments.isEmpty()
+						&& !segments.equals(cd.getSidAuthoritySegments())) {
+					var vr = io.reliza.common.SidPurlUtils.validateAuthoritySegments(segments);
+					if (!vr.valid()) {
+						throw new RelizaException("sidAuthoritySegments invalid: " + vr.error());
+					}
+				}
+				cd.setSidAuthoritySegments(segments.isEmpty() ? null : segments);
+			}
+			if (null != cdto.getIsInternal()) cd.setIsInternal(cdto.getIsInternal());
+			// sidPurl collision check after all field mutations have been applied so the
+			// candidate {cd} reflects exactly what would be saved (name, sidPurlOverride,
+			// sidAuthoritySegments, isInternal). Pass cd.getUuid() as excludeUuid so the
+			// candidate's own pre-update DB row isn't compared against itself.
+			checkSidCollision(cd, cd.getUuid());
 			Map<String,Object> componentData = Utils.dataToRecord(cd);
 			comp = saveComponent(comp, componentData, wu);
 		}
@@ -533,6 +582,10 @@ public class ComponentService {
 		Component c = getComponentService.getComponent(componentUuid).get();
 		ComponentData cd = ComponentData.dataFromRecord(c);
 		cd.setPerspectives(new LinkedHashSet<>(perspectiveUuids));
+		// sidPurl collision check: perspective changes can flip resolver enablement and/or
+		// authority segments under ENABLED_FLEXIBLE, so the new perspective set has to
+		// pass the same (segments, name) uniqueness gate the create/update paths use.
+		checkSidCollision(cd, cd.getUuid());
 		return saveComponent(c, Utils.dataToRecord(cd), wu);
 	}
 	
@@ -717,13 +770,100 @@ public class ComponentService {
 		// Find component by VCS UUID + orgUuid + repoPath (org-scoped)
 		try {
 			ComponentData componentData = findComponentDataByVcsAndPath(vcsRepoData.get().getUuid(), orgUuid, repoPath);
-			log.debug("Component resolved : componentId={}, componentName={}, repoPath={}", 
+			log.debug("Component resolved : componentId={}, componentName={}, repoPath={}",
 			 componentData.getUuid(), componentData.getName(), repoPath);
 			return componentData;
 		} catch (RelizaException e) {
-			log.error("Component resolution failed : vcsUri={}, repoPath={}, vcsUuid={}, orgUuid={}, error={}", 
+			log.error("Component resolution failed : vcsUri={}, repoPath={}, vcsUuid={}, orgUuid={}, error={}",
 			 vcsUri, repoPath, vcsRepoData.get().getUuid(), orgUuid, e.getMessage());
 			throw e;
+		}
+	}
+
+	/**
+	 * sidPurl read-side collision check: reject the write if {@code candidate} would, once
+	 * saved, resolve to the same {@code (segments, name)} sid identity as some other
+	 * active component in the same org. Excludes EXTERNAL components and any component
+	 * whose resolver policy is disabled (no collision possible unless both sides would
+	 * actually emit a platform sid PURL).
+	 *
+	 * <p>{@code excludeUuid} is the candidate's own UUID on update/perspective-set so
+	 * the candidate doesn't collide with its own pre-save row; pass {@code null} on create.
+	 *
+	 * <p>Race window is accepted (design §6, item 1) — two concurrent creates against
+	 * the same {@code (segments, name)} can both pass this check. Closed later with a
+	 * Postgres advisory lock if it leaks in production.
+	 */
+	private void checkSidCollision(ComponentData candidate, UUID excludeUuid) throws RelizaException {
+		if (candidate.getIsInternalOrDefault() != BelongsToOrganization.INTERNAL) {
+			return;
+		}
+		Optional<OrganizationData> orgOpt = getOrganizationService.getOrganizationData(candidate.getOrg());
+		if (orgOpt.isEmpty()) {
+			return;
+		}
+		OrganizationData org = orgOpt.get();
+		SidPurlResolver.ResolvedSidPolicy candidatePolicy = sidPurlResolver.resolveForComponent(candidate, org);
+		if (!candidatePolicy.enabled()) {
+			return;
+		}
+		List<String> candidateSegments = candidatePolicy.authoritySegments();
+		String candidateName = candidate.getName();
+		if (candidateSegments == null || candidateSegments.isEmpty() || candidateName == null) {
+			// Resolver said enabled but produced no segments — orchestrator's
+			// validateAuthoritySegments will reject at release-create time. No
+			// collision check possible; let the downstream gate surface the error.
+			return;
+		}
+
+		// Pre-filter siblings by name (cheap string equality) before paying the
+		// per-sibling resolve cost. Same-org names that don't match the candidate
+		// can never collide on (segments, name).
+		List<ComponentData> siblings = listComponentDataByOrganization(candidate.getOrg(), ComponentType.ANY);
+		for (ComponentData sibling : siblings) {
+			if (excludeUuid != null && excludeUuid.equals(sibling.getUuid())) {
+				continue;
+			}
+			if (sibling.getStatus() != StatusEnum.ACTIVE) {
+				continue;
+			}
+			if (sibling.getIsInternalOrDefault() != BelongsToOrganization.INTERNAL) {
+				continue;
+			}
+			if (!candidateName.equals(sibling.getName())) {
+				continue;
+			}
+			SidPurlResolver.ResolvedSidPolicy siblingPolicy = sidPurlResolver.resolveForComponent(sibling, org);
+			if (!siblingPolicy.enabled()) {
+				continue;
+			}
+			if (!candidateSegments.equals(siblingPolicy.authoritySegments())) {
+				continue;
+			}
+			throw new RelizaException("sid PURL collision: component " + sibling.getUuid()
+					+ " (\"" + sibling.getName() + "\") already resolves to pkg:sid/"
+					+ String.join("/", candidateSegments) + "/" + candidateName
+					+ " in this organization. Rename one of the components or change the "
+					+ "authority segments to disambiguate.");
+		}
+	}
+
+	/**
+	 * Reject ENABLE/DISABLE component-level overrides unless the org is in
+	 * {@link SidPurlMode#ENABLED_FLEXIBLE}. INHERIT/null are always allowed —
+	 * they express no override.
+	 */
+	private void validateSidOverrideAgainstOrg(UUID orgUuid, SidPurlOverride override) throws RelizaException {
+		if (override == null || override == SidPurlOverride.INHERIT) {
+			return;
+		}
+		var od = getOrganizationService.getOrganizationData(orgUuid);
+		SidPurlMode mode = od.isPresent() && od.get().getSettings() != null
+				? od.get().getSettings().getSidPurlModeOrDefault()
+				: SidPurlMode.DISABLED;
+		if (mode != SidPurlMode.ENABLED_FLEXIBLE) {
+			throw new RelizaException("sidPurlOverride=" + override
+					+ " requires org sidPurlMode=ENABLED_FLEXIBLE (current: " + mode + ")");
 		}
 	}
 }

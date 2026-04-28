@@ -28,6 +28,7 @@ import io.reliza.common.CommonVariables;
 import io.reliza.common.CommonVariables.ApprovalState;
 import io.reliza.common.EnvironmentType;
 import io.reliza.common.CommonVariables.TagRecord;
+import io.reliza.common.SidPurlUtils;
 import io.reliza.common.Utils;
 import io.reliza.common.ValidationResult;
 import io.reliza.model.dto.ReleaseMetricsDto;
@@ -175,9 +176,28 @@ public class ReleaseData extends RelizaDataParent implements RelizaObject, Gener
 	
 	@JsonProperty
 	private List<TeaIdentifier> identifiers = new LinkedList<>();
-	
+
 	public List<TeaIdentifier> getIdentifiers () {
 		return new LinkedList<>(this.identifiers);
+	}
+
+	/**
+	 * Component name captured at first sid emission. Immutable thereafter — a later
+	 * component rename does not retroactively edit historical releases. Null when sid
+	 * was never emitted for this release.
+	 */
+	@JsonProperty
+	private String sidComponentName;
+
+	/**
+	 * Preferred BOM root identifier: sid PURL > any other PURL > release UUID.
+	 * Always non-null. Used by VDR / OBOM / aggregated SBOM / DTrack at consumption time.
+	 */
+	@JsonIgnore
+	public String getPreferredBomIdentifier() {
+		return SidPurlUtils.pickPreferredPurl(this.identifiers)
+				.map(TeaIdentifier::getIdValue)
+				.orElseGet(() -> this.uuid != null ? this.uuid.toString() : null);
 	}
 
 	@JsonProperty(CommonVariables.NOTES_FIELD)
@@ -278,6 +298,9 @@ public class ReleaseData extends RelizaDataParent implements RelizaObject, Gener
 		}
 		if (null != releaseDto.getIdentifiers()) {
 			rd.setIdentifiers(releaseDto.getIdentifiers());
+		}
+		if (null != releaseDto.getSidComponentName()) {
+			rd.setSidComponentName(releaseDto.getSidComponentName());
 		}
 		return rd;
 	}

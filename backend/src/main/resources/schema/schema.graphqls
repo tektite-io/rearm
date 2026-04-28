@@ -226,6 +226,14 @@ type Mutation {
 	archiveBranch(branchUuid: ID!): Boolean
 	archiveComponent(componentUuid: ID!): Boolean
 	setNextVersion(branchUuid: ID!, versionString: String!, versionType: VersionType): Boolean
+	"""
+	Iterates active releases of the component and fills in identifiers for any that
+	currently have an empty identifier list. Releases that already carry any identifier
+	(PURL, CPE, TEI, etc.) are left untouched — this mutation is intentionally narrow
+	per design D13 / D15: v1 does not productize a "rebuild sid PURL on existing releases"
+	flow. Operators wanting to migrate sid identity on already-identified releases must
+	use a one-off script.
+	"""
 	updateComponentReleasesIdentifiers(componentUuid: ID!): Boolean
 	
 	createVcsRepository(vcsRepository: VcsRepositoryInput!): VcsRepository
@@ -351,6 +359,13 @@ type Mutation {
 	# Perspectives
 	createPerspective(org: ID!, name: String!): Perspective
 	updatePerspective(uuid: ID!, name: String!): Perspective
+	"""
+	Set the sid override + authority segments on a real perspective (SaaS only;
+	rejects product-derived perspectives with a clear error). Each field is
+	optional — null leaves the existing value unchanged. ENABLE/DISABLE override
+	writes are rejected when the org is not in ENABLED_FLEXIBLE (D3 / G2).
+	"""
+	updatePerspectiveSidPurl(uuid: ID!, sidPurlOverride: SidPurlOverride, sidAuthoritySegments: [String!]): Perspective
 	deletePerspective(uuid: ID!): Perspective
 	setPerspectivesOnComponent(componentUuid: ID!, perspectiveUuids: [ID!]!): Component
 	"""
@@ -490,6 +505,12 @@ type Component {
 	branchSuffixMode: BranchSuffixMode
 	globalInputEventRefs: [GlobalInputEventRef]
 	perspectiveDetails: [Perspective]
+	"""Component-level sid override (null = INHERIT)."""
+	sidPurlOverride: SidPurlOverride
+	"""Component-level decoded authority segments (null/empty = none stored)."""
+	sidAuthoritySegments: [String!]
+	"""Internal/external classification (D16). Null on legacy rows is treated as INTERNAL."""
+	isInternal: BelongsToOrganization
 }
 
 enum ComponentKind {
@@ -550,6 +571,58 @@ type Settings {
 	justificationMandatory: Boolean
 	branchSuffixMode: BranchSuffixMode
 	vexComplianceFramework: VexComplianceFramework
+	"""
+	Org-level mode for sid (Software IDentification) PURL emission. See SidPurlMode docs.
+	Null is treated as DISABLED at resolution time.
+	"""
+	sidPurlMode: SidPurlMode
+	"""
+	Decoded authority segments used when emitting platform sid PURLs. The first segment is
+	the authority (domain or registered name); subsequent segments are publisher / business
+	unit / product line context. Required when sidPurlMode == ENABLED_STRICT; optional under
+	ENABLED_FLEXIBLE (used as a fallback when components/perspectives don't supply their own);
+	must be null/empty under DISABLED.
+	"""
+	sidAuthoritySegments: [String!]
+}
+
+"""
+Org-level sid PURL emission policy. D11 / D15.
+- DISABLED: no sid emission; tenant-supplied pkg:sid/... values pass through unchanged.
+- ENABLED_STRICT: sid emitted org-wide; component/perspective overrides not honored;
+  the org authority applies to every internal component.
+- ENABLED_FLEXIBLE: sid emitted org-wide, but components and (SaaS) perspectives
+  may override the per-component decision and supply their own authority.
+
+Enabling sid is forward-only — releases created before the toggle retain their
+existing identifiers unchanged.
+"""
+enum SidPurlMode {
+	DISABLED
+	ENABLED_STRICT
+	ENABLED_FLEXIBLE
+}
+
+"""
+Component- and perspective-level sid override. Only honored when the org is in
+ENABLED_FLEXIBLE; the mutation layer rejects ENABLE/DISABLE writes when the org
+is STRICT or DISABLED. INHERIT (and null) defer to the next level up.
+"""
+enum SidPurlOverride {
+	INHERIT
+	ENABLE
+	DISABLE
+}
+
+"""
+Internal/external classification of a component (D16). EXTERNAL components are
+third-party dependencies tracked inside the tenant's org and never receive a
+platform-stamped sid PURL — stamping the tenant's authority on third-party
+software would be a falsified vendor claim. Defaults to INTERNAL on create.
+"""
+enum BelongsToOrganization {
+	INTERNAL
+	EXTERNAL
 }
 
 """
@@ -1095,6 +1168,18 @@ type Release {
 	updateEvents: [ReleaseUpdateEvent]
 	metrics: DependencyTrackMetrics
 	identifiers: [Identifier]
+	"""
+	Component name snapshot captured when a sid PURL was first emitted for this release (D6).
+	Immutable once set. Null on releases pre-dating sid enablement and on releases of
+	EXTERNAL components.
+	"""
+	sidComponentName: String
+	"""
+	Resolved BOM root identifier per the D4 picker: sid PURL > any other PURL >
+	release UUID. Always non-null. Used by the UI to display the canonical
+	identifier and matches what VDR / OBOM / aggregated-SBOM emit at the BOM root.
+	"""
+	preferredBomIdentifier: String
 	releaseCollection: ReleaseCollection
 	intermediateFailedReleases: [IntermediateFailedRelease]
 	# True if the release has been queued for SBOM-component reconciliation
@@ -1394,6 +1479,15 @@ type Perspective {
 	name: String
 	createdDate: DateTime
 	type: PerspectiveType
+	"""
+	Perspective-level sid override (SaaS only, real perspectives only). Null/INHERIT
+	defers to the org. Only writeable when the org is in ENABLED_FLEXIBLE.
+	"""
+	sidPurlOverride: SidPurlOverride
+	"""
+	Perspective-level decoded authority segments (SaaS only).
+	"""
+	sidAuthoritySegments: [String!]
 }
 
 enum PerspectiveType {
@@ -1739,6 +1833,21 @@ input SettingsInput {
 	justificationMandatory: Boolean
 	branchSuffixMode: BranchSuffixMode
 	vexComplianceFramework: VexComplianceFramework
+	"""
+	Set the org-level sid PURL mode. See SidPurlMode docs. Partial-patch idiom:
+	null leaves the existing value unchanged. Pairs with sidAuthoritySegments;
+	ENABLED_STRICT requires non-empty segments to be present (either in this
+	patch or already on the record).
+	"""
+	sidPurlMode: SidPurlMode
+	"""
+	Set the org-level decoded authority segments. Validation: domain-form first
+	segment passes RFC 1035; registry-form first segment (no dot) accepted with
+	a warning since the backend cannot verify the upstream PURL registry.
+	Internal whitespace allowed (e.g. "Acme Robotics"); leading/trailing
+	whitespace rejected.
+	"""
+	sidAuthoritySegments: [String!]
 }
 
 input PermissionInput {
@@ -1766,6 +1875,22 @@ input CreateComponentInput {
 	identifiers: [IdentifierInput]
 	repoPath: String
 	branchSuffixMode: BranchSuffixMode
+	"""
+	Component-level sid override. Only writeable when the org is in ENABLED_FLEXIBLE;
+	the mutation layer rejects ENABLE/DISABLE writes otherwise (D3).
+	"""
+	sidPurlOverride: SidPurlOverride
+	"""
+	Component-level authority segments. May be set even when sidPurlOverride is INHERIT —
+	the segments only take effect once a higher level enables sid for this component.
+	"""
+	sidAuthoritySegments: [String!]
+	"""
+	Whether this component is the tenant's own software (INTERNAL) or a tracked
+	third-party dependency (EXTERNAL). Defaults to INTERNAL when null. EXTERNAL
+	components never receive a platform-stamped sid PURL (D16).
+	"""
+	isInternal: BelongsToOrganization
 }
 
 input UpdateComponentInput {
@@ -1785,6 +1910,20 @@ input UpdateComponentInput {
 	repoPath: String
 	authentication: ComponentAuthenticationInput
 	branchSuffixMode: BranchSuffixMode
+	"""
+	Update component-level sid override. Null leaves the existing value unchanged.
+	INHERIT clears the override (defers to higher level). Only writeable under
+	org ENABLED_FLEXIBLE.
+	"""
+	sidPurlOverride: SidPurlOverride
+	"""
+	Update component-level authority segments. Null leaves the existing value unchanged.
+	"""
+	sidAuthoritySegments: [String!]
+	"""
+	Update internal/external classification (D16). Null leaves the existing value unchanged.
+	"""
+	isInternal: BelongsToOrganization
 }
 
 input GlobalInputEventRefInput {

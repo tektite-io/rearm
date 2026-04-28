@@ -18,9 +18,11 @@ import org.springframework.stereotype.Service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 
+import io.reliza.common.SidPurlUtils;
 import io.reliza.model.ReleaseData;
 import io.reliza.model.ReleaseData.ReleaseLifecycle;
 import io.reliza.model.VdrSnapshotType;
+import io.reliza.model.tea.TeaIdentifier;
 
 /**
  * Generates OpenVEX 0.2.0 documents for a release.
@@ -48,9 +50,11 @@ import io.reliza.model.VdrSnapshotType;
  * on a status other than {@code affected}. This service therefore gates every free-text /
  * enum-justification field on status.
  *
- * <p>Products identify the release itself (one product per statement, no subcomponents) via
- * a stable {@code urn:uuid:<release>} identifier. This is a release-level VEX; consumers who
- * need component-level granularity should consume the paired CycloneDX VEX.
+ * <p>Products identify the release itself (one product per statement, no subcomponents). The
+ * preferred sid PURL (or any other PURL on the release) is used when available — falling back
+ * to {@code urn:uuid:<release>} when the release carries no PURL identifier. This is a
+ * release-level VEX; consumers who need component-level granularity should consume the paired
+ * CycloneDX VEX.
  */
 @Service
 public class OpenVexService {
@@ -94,8 +98,11 @@ public class OpenVexService {
 			ZonedDateTime cutOffDate, VdrSnapshotType snapshotType, String snapshotValue) throws Exception {
 		Bom vexBom = releaseService.buildCdxVexBom(releaseData, includeSuppressed, includeInTriage,
 				cutOffDate, snapshotType, snapshotValue);
-		Map<String, Object> doc = buildOpenVexDocument(vexBom, releaseData.getUuid(), cutOffDate,
-				snapshotType, snapshotValue, includeSuppressed, includeInTriage);
+		String productPurl = SidPurlUtils.pickPreferredPurl(releaseData.getIdentifiers())
+				.map(TeaIdentifier::getIdValue)
+				.orElse(null);
+		Map<String, Object> doc = buildOpenVexDocument(vexBom, releaseData.getUuid(), productPurl,
+				cutOffDate, snapshotType, snapshotValue, includeSuppressed, includeInTriage);
 		return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(doc);
 	}
 
@@ -106,8 +113,8 @@ public class OpenVexService {
 	 * CDX VEX {@link Bom} and emits the OpenVEX JSON structure. Key ordering follows the OpenVEX
 	 * spec convention (@context, @id, author, timestamp, version, statements).
 	 */
-	static Map<String, Object> buildOpenVexDocument(Bom vexBom, UUID releaseUuid, ZonedDateTime cutOffDate,
-			VdrSnapshotType snapshotType, String snapshotValue,
+	static Map<String, Object> buildOpenVexDocument(Bom vexBom, UUID releaseUuid, String productPurl,
+			ZonedDateTime cutOffDate, VdrSnapshotType snapshotType, String snapshotValue,
 			Boolean includeSuppressed, Boolean includeInTriage) {
 		Map<String, Object> doc = new LinkedHashMap<>();
 		doc.put("@context", OPENVEX_CONTEXT);
@@ -117,7 +124,9 @@ public class OpenVexService {
 		doc.put("timestamp", (cutOffDate != null ? cutOffDate : ZonedDateTime.now()).toInstant().toString());
 		doc.put("version", OPENVEX_DOC_VERSION);
 
-		String productId = "urn:uuid:" + releaseUuid;
+		String productId = (productPurl != null && !productPurl.isBlank())
+				? productPurl
+				: "urn:uuid:" + releaseUuid;
 		List<Map<String, Object>> statements = new ArrayList<>();
 		if (vexBom.getVulnerabilities() != null) {
 			for (Vulnerability v : vexBom.getVulnerabilities()) {

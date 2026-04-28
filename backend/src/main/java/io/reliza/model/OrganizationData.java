@@ -24,6 +24,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.reliza.common.CommonVariables;
 import io.reliza.common.CommonVariables.ApprovalRole;
 import io.reliza.common.CommonVariables.BranchSuffixMode;
+import io.reliza.common.CommonVariables.SidPurlMode;
 import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.common.Utils;
 import io.reliza.model.UserPermission.PermissionType;
@@ -79,6 +80,18 @@ public class OrganizationData extends RelizaDataParent implements RelizaObject {
 		@JsonProperty
 		private VexComplianceFramework vexComplianceFramework;
 
+		/** Null is treated as {@link SidPurlMode#DISABLED} at resolution time. */
+		@JsonProperty
+		private SidPurlMode sidPurlMode;
+
+		/**
+		 * Decoded authority segments. First is the authority (domain or registered name);
+		 * subsequent are publisher/BU/product-line. Required when ENABLED_STRICT; optional
+		 * under ENABLED_FLEXIBLE; must be null/empty when DISABLED.
+		 */
+		@JsonProperty
+		private List<String> sidAuthoritySegments;
+
 		public static Settings getDefault() {
 			return new Settings();
 		}
@@ -88,6 +101,13 @@ public class OrganizationData extends RelizaDataParent implements RelizaObject {
 		 */
 		public VexComplianceFramework getVexComplianceFrameworkOrDefault() {
 			return vexComplianceFramework != null ? vexComplianceFramework : VexComplianceFramework.NONE;
+		}
+
+		/**
+		 * @return the configured sid PURL mode, or {@link SidPurlMode#DISABLED} if unset.
+		 */
+		public SidPurlMode getSidPurlModeOrDefault() {
+			return sidPurlMode != null ? sidPurlMode : SidPurlMode.DISABLED;
 		}
 	}
 

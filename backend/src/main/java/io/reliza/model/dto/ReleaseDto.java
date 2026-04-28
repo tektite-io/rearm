@@ -63,6 +63,10 @@ public class ReleaseDto {
 	@JsonProperty
 	private List<TeaIdentifier> identifiers;
 
+	/** System-controlled — set by the orchestrator on release create, immutable thereafter. */
+	@JsonProperty
+	private String sidComponentName;
+
 	@JsonProperty
 	private List<UUID> inboundDeliverables;
 	@JsonProperty

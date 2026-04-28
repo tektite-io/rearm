@@ -89,7 +89,7 @@ public class OpenVexServiceSchemaTest {
 		Bom bom = new Bom();
 		bom.setVulnerabilities(new ArrayList<>());
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
 		assertSchemaValid(doc);
 	}
 
@@ -99,7 +99,7 @@ public class OpenVexServiceSchemaTest {
 		bom.setVulnerabilities(new ArrayList<>(List.of(
 				vulnWith("CVE-2024-0001", Vulnerability.Analysis.State.EXPLOITABLE, null, "upstream patch pending"))));
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, VdrSnapshotType.LIFECYCLE, "production",
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, VdrSnapshotType.LIFECYCLE, "production",
 				Boolean.FALSE, Boolean.FALSE);
 		assertSchemaValid(doc);
 	}
@@ -110,7 +110,7 @@ public class OpenVexServiceSchemaTest {
 		bom.setVulnerabilities(new ArrayList<>(List.of(
 				vulnWith("CVE-2024-0002", Vulnerability.Analysis.State.RESOLVED, null, null))));
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, VdrSnapshotType.DATE, null, Boolean.FALSE, Boolean.FALSE);
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, VdrSnapshotType.DATE, null, Boolean.FALSE, Boolean.FALSE);
 		assertSchemaValid(doc);
 	}
 
@@ -122,7 +122,7 @@ public class OpenVexServiceSchemaTest {
 						Vulnerability.Analysis.Justification.CODE_NOT_REACHABLE,
 						"Vulnerable method never invoked."))));
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
 		assertSchemaValid(doc);
 	}
 
@@ -134,7 +134,7 @@ public class OpenVexServiceSchemaTest {
 				vulnWith("CVE-2024-0004", Vulnerability.Analysis.State.FALSE_POSITIVE, null,
 						"Scanner matched on unrelated namespace."))));
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
 		assertSchemaValid(doc);
 	}
 
@@ -144,7 +144,7 @@ public class OpenVexServiceSchemaTest {
 		bom.setVulnerabilities(new ArrayList<>(List.of(
 				vulnWith("CVE-2024-0005", Vulnerability.Analysis.State.IN_TRIAGE, null, null))));
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.TRUE);
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.TRUE);
 		assertSchemaValid(doc);
 	}
 
@@ -160,7 +160,7 @@ public class OpenVexServiceSchemaTest {
 				vulnWith("CVE-D", Vulnerability.Analysis.State.RESOLVED, null, null),
 				vulnWith("CVE-E", Vulnerability.Analysis.State.IN_TRIAGE, null, null))));
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, VdrSnapshotType.LIFECYCLE, "production",
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, VdrSnapshotType.LIFECYCLE, "production",
 				Boolean.TRUE, Boolean.TRUE);
 		assertSchemaValid(doc);
 	}
@@ -175,7 +175,7 @@ public class OpenVexServiceSchemaTest {
 		bom.setVulnerabilities(new ArrayList<>(List.of(
 				vulnWith("CVE-X", Vulnerability.Analysis.State.EXPLOITABLE, null, null))));
 		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(
-				bom, FIXED_RELEASE, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
+				bom, FIXED_RELEASE, null, FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
 		String json = MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(doc);
 		String broken = json.replaceFirst(
 				"\"status\"\\s*:\\s*\"affected\"",

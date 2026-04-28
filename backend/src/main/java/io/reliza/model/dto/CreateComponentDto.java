@@ -12,7 +12,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import io.reliza.common.CommonVariables;
 import io.reliza.common.CommonVariables.BranchSuffixMode;
+import io.reliza.common.CommonVariables.SidPurlOverride;
 import io.reliza.model.ComponentData.DefaultBranchName;
+import io.reliza.model.DeliverableData.BelongsToOrganization;
 import io.reliza.model.VersionAssignment.VersionTypeEnum;
 import io.reliza.model.tea.TeaIdentifier;
 import io.reliza.model.ComponentData.ComponentKind;
@@ -60,4 +62,13 @@ public class CreateComponentDto {
 	 * Null or INHERIT = inherit from organization setting.
 	 */
 	private BranchSuffixMode branchSuffixMode;
+
+	/** Null/INHERIT defers to higher level. */
+	private SidPurlOverride sidPurlOverride;
+
+	/** Authority segments. May be set without enabling — only take effect when an upper level enables. */
+	private List<String> sidAuthoritySegments;
+
+	/** INTERNAL/EXTERNAL classification. Server defaults null to INTERNAL on create. */
+	private BelongsToOrganization isInternal;
 }

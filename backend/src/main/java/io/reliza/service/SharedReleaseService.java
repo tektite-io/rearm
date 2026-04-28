@@ -31,6 +31,7 @@ import org.springframework.stereotype.Service;
 import com.github.packageurl.PackageURL;
 
 import io.reliza.common.CommonVariables;
+import io.reliza.common.SidPurlUtils;
 import io.reliza.common.Utils;
 import org.springframework.transaction.annotation.Transactional;
 import io.reliza.common.CommonVariables.StatusEnum;
@@ -41,6 +42,7 @@ import io.reliza.model.BranchData;
 import io.reliza.model.BranchData.BranchType;
 import io.reliza.model.ComponentData;
 import io.reliza.model.GenericReleaseData;
+import io.reliza.model.OrganizationData;
 import io.reliza.model.ParentRelease;
 import io.reliza.model.Release;
 import io.reliza.model.ReleaseData;
@@ -69,15 +71,18 @@ public class SharedReleaseService {
 
 	@Autowired
 	BranchService branchService;
-	
+
 	@Autowired
 	GetComponentService getComponentService;
-	
+
 	@Autowired
 	GetSourceCodeEntryService getSourceCodeEntryService;
-	
+
 	@Autowired
 	ArtifactService artifactService;
+
+	@Autowired
+	private SidPurlResolver sidPurlResolver;
 	
 	public final static Integer DEFAULT_NUM_RELEASES = 300;
 	private final static Integer DEFAULT_NUM_RELEASES_FOR_LATEST_RELEASE = 10;
@@ -938,30 +943,125 @@ public class SharedReleaseService {
 		return commitIdToMessageMap;
 	}
 	
-	public List<TeaIdentifier> resolveReleaseIdentifiersFromComponent(ReleaseData rd) {
-		ComponentData cd = getComponentService.getComponentData(rd.getComponent()).get();
-		return resolveReleaseIdentifiersFromComponent(rd.getVersion(), cd);
-	}
-	
-	public List<TeaIdentifier> resolveReleaseIdentifiersFromComponent(String releaseVersion, ComponentData cd) {
-		List<TeaIdentifier> releaseIdentifier = new LinkedList<>();
-		try {
-			var compIdentifiers = cd.getIdentifiers();
-			if (null != compIdentifiers && !compIdentifiers.isEmpty()) {
-				Optional<TeaIdentifier> purlIdentifier = compIdentifiers.stream().filter(x -> x.getIdType() == TeaIdentifierType.PURL).findFirst();
-				if (purlIdentifier.isPresent()) {
-					PackageURL purlObj = new PackageURL(purlIdentifier.get().getIdValue());
-					PackageURL versionedPurl = Utils.setVersionOnPurl(purlObj, releaseVersion);
-					TeaIdentifier teaPurl = new TeaIdentifier();
-					teaPurl.setIdType(TeaIdentifierType.PURL);
-					teaPurl.setIdValue(versionedPurl.canonicalize());
-					releaseIdentifier.add(teaPurl);
-				}
-			}
-		} catch (Exception e) {
-			log.error("Error on resolving release identifiers from component", e);
+	// --- sid PURL orchestrator ---
+
+	/** Output of {@link #buildReleaseIdentifiers}. The orchestrator does not mutate inputs. */
+	public record BuildIdentifiersResult(
+			List<TeaIdentifier> identifiers,
+			String sidComponentNameSnapshot
+	) {}
+
+	/**
+	 * Build the canonical identifier list for a release at creation time.
+	 *
+	 * <p>Caller-supplied identifiers are preserved; a platform sid PURL is appended when
+	 * the resolver returns enabled; carryover from the component's own PURL runs only when
+	 * the caller supplied no identifiers. Existing snapshot is honored as-is — never overwritten.
+	 *
+	 * @throws RelizaException on perspective ambiguity, or when the resolver returns enabled
+	 *   with invalid authority segments (would emit a malformed {@code pkg:sid//...}).
+	 */
+	public BuildIdentifiersResult buildReleaseIdentifiers(ComponentData cd, OrganizationData org, String version,
+			String existingSidComponentName, List<TeaIdentifier> callerProvided) throws RelizaException {
+		List<TeaIdentifier> result = (callerProvided != null && !callerProvided.isEmpty())
+				? new LinkedList<>(callerProvided)
+				: new LinkedList<>();
+
+		SidPurlResolver.ResolvedSidPolicy policy = sidPurlResolver.resolveForComponent(cd, org);
+
+		// Strip caller-supplied sid only when the platform is about to emit its own —
+		// otherwise vendor-supplied sid (typical for EXTERNAL components) passes through.
+		if (policy.enabled()) {
+			result.removeIf(SharedReleaseService::isSidPurlIdentifier);
 		}
-		return releaseIdentifier;
+
+		String snapshotToWrite = existingSidComponentName;
+		if (policy.enabled()) {
+			SidIdentifierResult sidResult = buildSidPurlIdentifier(cd, policy, version, existingSidComponentName);
+			result.add(sidResult.identifier());
+			snapshotToWrite = sidResult.snapshotName();
+		}
+
+		boolean callerEmpty = (callerProvided == null || callerProvided.isEmpty());
+		if (callerEmpty) {
+			Optional<TeaIdentifier> carry = deriveCarryoverPurl(cd, version, policy.enabled());
+			carry.ifPresent(result::add);
+		}
+
+		return new BuildIdentifiersResult(result, snapshotToWrite);
+	}
+
+	private record SidIdentifierResult(TeaIdentifier identifier, String snapshotName) {}
+
+	/**
+	 * Version-stamp the component's first PURL into a release identifier.
+	 * {@code skipSid=true} skips {@code pkg:sid/...} on the scan so a stale vendor sid
+	 * doesn't race the platform-emitted one. {@code skipSid=false} preserves it — that's
+	 * how vendor-asserted sid identity rides through to releases of EXTERNAL components.
+	 * Returns empty (not throws) on failure so callers can decide.
+	 */
+	public Optional<TeaIdentifier> deriveCarryoverPurl(ComponentData cd, String version, boolean skipSid) {
+		try {
+			List<TeaIdentifier> compIdentifiers = cd.getIdentifiers();
+			if (compIdentifiers == null || compIdentifiers.isEmpty()) {
+				return Optional.empty();
+			}
+			Optional<TeaIdentifier> purlIdentifier = compIdentifiers.stream()
+					.filter(ti -> ti.getIdType() == TeaIdentifierType.PURL)
+					.filter(ti -> !skipSid || !isSidPurlIdentifier(ti))
+					.findFirst();
+			if (purlIdentifier.isEmpty()) {
+				return Optional.empty();
+			}
+			PackageURL purlObj = new PackageURL(purlIdentifier.get().getIdValue());
+			PackageURL versionedPurl = Utils.setVersionOnPurl(purlObj, version);
+			TeaIdentifier teaPurl = new TeaIdentifier();
+			teaPurl.setIdType(TeaIdentifierType.PURL);
+			teaPurl.setIdValue(versionedPurl.canonicalize());
+			return Optional.of(teaPurl);
+		} catch (Exception e) {
+			log.error("Error deriving carryover PURL for component {}", cd.getUuid(), e);
+			return Optional.empty();
+		}
+	}
+
+	/**
+	 * Build a sid PURL identifier from a pre-resolved policy. Throws if the policy is
+	 * enabled but its segments are invalid — never emits {@code pkg:sid//<name>@v}.
+	 * Returns the snapshot the caller should persist (existing one if non-null,
+	 * otherwise {@code cd.getName()} captured here). Caller must ensure
+	 * {@code policy.enabled() == true}.
+	 */
+	private SidIdentifierResult buildSidPurlIdentifier(ComponentData cd,
+			SidPurlResolver.ResolvedSidPolicy policy, String version, String existingSnapshot)
+			throws RelizaException {
+		SidPurlUtils.ValidationResult vr = SidPurlUtils.validateAuthoritySegments(policy.authoritySegments());
+		if (!vr.valid()) {
+			throw new RelizaException("Cannot emit sid PURL for component " + cd.getUuid()
+					+ ": resolver returned enabled but authority segments are invalid (" + vr.error() + ")");
+		}
+
+		// Snapshot is immutable once set; updateRelease enforces this on the write side.
+		String snapshotName = existingSnapshot != null ? existingSnapshot : cd.getName();
+
+		String sidPurl = SidPurlUtils.buildSidPurl(policy.authoritySegments(), snapshotName, version,
+				/* qualifiers */ null, /* subpath */ null);
+
+		TeaIdentifier ti = new TeaIdentifier();
+		ti.setIdType(TeaIdentifierType.PURL);
+		ti.setIdValue(sidPurl);
+		return new SidIdentifierResult(ti, snapshotName);
+	}
+
+	/**
+	 * @return true iff the identifier is a PURL whose parsed type is {@code "sid"}.
+	 *   Delegates to {@link SidPurlUtils#isSidPurl(String)}.
+	 */
+	private static boolean isSidPurlIdentifier(TeaIdentifier ti) {
+		if (ti == null || ti.getIdType() != TeaIdentifierType.PURL) {
+			return false;
+		}
+		return SidPurlUtils.isSidPurl(ti.getIdValue());
 	}
 	
 	private Set<UUID> gatherReleaseIdsForArtifact(UUID artifactUuid, UUID orgUuid){

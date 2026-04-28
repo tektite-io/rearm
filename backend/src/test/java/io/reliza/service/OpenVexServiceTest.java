@@ -302,7 +302,7 @@ public class OpenVexServiceTest {
 				vulnWith("CVE-FP", Vulnerability.Analysis.State.FALSE_POSITIVE, null, null),
 				vulnWith("CVE-FIX", Vulnerability.Analysis.State.RESOLVED, null, null),
 				vulnWith("CVE-IT", Vulnerability.Analysis.State.IN_TRIAGE, null, null))));
-		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, FIXED_CUTOFF,
+		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, null, FIXED_CUTOFF,
 				null, null, Boolean.TRUE, Boolean.TRUE);
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> statements = (List<Map<String, Object>>) doc.get("statements");
@@ -349,6 +349,35 @@ public class OpenVexServiceTest {
 		assertEquals(productId, products.get(0).get("@id"));
 	}
 
+	@Test
+	void document_uses_product_purl_when_provided() {
+		Bom bom = new Bom();
+		bom.setVulnerabilities(new ArrayList<>(List.of(
+				vulnWith("CVE-2024-9999", Vulnerability.Analysis.State.EXPLOITABLE, null, null))));
+		String purl = "pkg:sid/component.override/myapp-backend@102.0.5";
+		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, purl,
+				FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> statements = (List<Map<String, Object>>) doc.get("statements");
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> products = (List<Map<String, Object>>) statements.get(0).get("products");
+		assertEquals(purl, products.get(0).get("@id"));
+	}
+
+	@Test
+	void document_falls_back_to_uuid_when_purl_blank() {
+		Bom bom = new Bom();
+		bom.setVulnerabilities(new ArrayList<>(List.of(
+				vulnWith("CVE-2024-8888", Vulnerability.Analysis.State.EXPLOITABLE, null, null))));
+		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, "   ",
+				FIXED_CUTOFF, null, null, Boolean.FALSE, Boolean.FALSE);
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> statements = (List<Map<String, Object>>) doc.get("statements");
+		@SuppressWarnings("unchecked")
+		List<Map<String, Object>> products = (List<Map<String, Object>>) statements.get(0).get("products");
+		assertEquals("urn:uuid:" + FIXED_RELEASE, products.get(0).get("@id"));
+	}
+
 	// ---- End-to-end document shape ----
 
 	@Test
@@ -359,7 +388,7 @@ public class OpenVexServiceTest {
 				vulnWith("CVE-B", Vulnerability.Analysis.State.NOT_AFFECTED,
 						Vulnerability.Analysis.Justification.CODE_NOT_PRESENT, null))));
 
-		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, FIXED_CUTOFF,
+		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, null, FIXED_CUTOFF,
 				VdrSnapshotType.DATE, null, Boolean.FALSE, Boolean.FALSE);
 
 		// Required top-level keys
@@ -392,7 +421,7 @@ public class OpenVexServiceTest {
 				bare,
 				vulnWith("CVE-OK", Vulnerability.Analysis.State.EXPLOITABLE, null, null))));
 
-		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, null,
+		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, null, null,
 				null, null, null, null);
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> statements = (List<Map<String, Object>>) doc.get("statements");
@@ -404,7 +433,7 @@ public class OpenVexServiceTest {
 	void document_empty_vulnerabilities_emits_empty_statements_array() {
 		Bom bom = new Bom();
 		bom.setVulnerabilities(null);
-		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, null,
+		Map<String, Object> doc = OpenVexService.buildOpenVexDocument(bom, FIXED_RELEASE, null, null,
 				null, null, null, null);
 		@SuppressWarnings("unchecked")
 		List<Map<String, Object>> statements = (List<Map<String, Object>>) doc.get("statements");

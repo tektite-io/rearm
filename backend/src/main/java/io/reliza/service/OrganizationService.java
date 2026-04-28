@@ -40,8 +40,10 @@ import io.reliza.common.CommonVariables.AuthorizationStatus;
 import io.reliza.common.CommonVariables.BranchSuffixMode;
 import io.reliza.common.CommonVariables.CallType;
 import io.reliza.common.CommonVariables.InstallationType;
+import io.reliza.common.CommonVariables.SidPurlMode;
 import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.common.CommonVariables.TableName;
+import io.reliza.common.SidPurlUtils;
 import io.reliza.common.oss.LicensingConstants;
 import io.reliza.exceptions.RelizaException;
 import io.reliza.common.Utils;
@@ -583,15 +585,15 @@ public class OrganizationService {
 	 */
 	@Transactional
 	public OrganizationData updateSettings(@NonNull UUID orgUuid, @NonNull OrganizationData.Settings settingsPatch,
-			@NonNull WhoUpdated wu) {
+			@NonNull WhoUpdated wu) throws RelizaException {
 		try {
 			BranchSuffixMode branchSuffixMode = settingsPatch.getBranchSuffixMode();
 			if (branchSuffixMode == BranchSuffixMode.INHERIT) {
-				throw new IllegalArgumentException("INHERIT is not a valid branchSuffixMode for organization settings");
+				throw new RelizaException("INHERIT is not a valid branchSuffixMode for organization settings");
 			}
 			OrganizationData od = getOrganizationService.getOrganizationData(orgUuid)
 					.orElseThrow(() -> new IllegalArgumentException("Organization not found: " + orgUuid));
-			
+
 			// Get or create settings object
 			OrganizationData.Settings settings = od.getSettings();
 			if (settings == null) {
@@ -610,17 +612,69 @@ public class OrganizationService {
 				settings.setVexComplianceFramework(settingsPatch.getVexComplianceFramework());
 			}
 
+			applySidPurlPatch(settings, settingsPatch);
+
 			od.setSettings(settings);
 			
 			Organization org = getOrganizationService.getOrganization(orgUuid)
 					.orElseThrow(() -> new IllegalStateException("Organization entity not found: " + orgUuid));
 			Organization savedOrg = saveOrganization(org, Utils.dataToRecord(od), wu);
 			return OrganizationData.orgDataFromDbRecord(savedOrg);
-		} catch (IllegalArgumentException e) {
+		} catch (RelizaException e) {
 			throw e;
+		} catch (IllegalArgumentException | IllegalStateException e) {
+			// Preserve the specific message (e.g. "Organization not found: <uuid>") so
+			// operators see the actual problem instead of the generic catch-all below.
+			throw new RelizaException(e.getMessage());
 		} catch (Exception e) {
 			log.error("Exception when updating organization settings", e);
-			throw new RuntimeException("Could not update organization settings");
+			throw new RelizaException("Could not update organization settings");
+		}
+	}
+
+	/**
+	 * Apply the sid-PURL slice of an org settings patch.
+	 * STRICT requires non-empty valid segments; FLEXIBLE accepts segments as optional
+	 * fallback; DISABLED clears segments. Patch fields are independently nullable
+	 * (null = leave unchanged).
+	 */
+	private void applySidPurlPatch(OrganizationData.Settings settings, OrganizationData.Settings patch) throws RelizaException {
+		SidPurlMode patchMode = patch.getSidPurlMode();
+		List<String> patchSegments = patch.getSidAuthoritySegments();
+
+		SidPurlMode effectiveMode = patchMode != null ? patchMode : settings.getSidPurlMode();
+		List<String> effectiveSegments = patchSegments != null ? patchSegments : settings.getSidAuthoritySegments();
+
+		// Validate any non-empty patch segments — otherwise invalid values could be
+		// persisted while sid is off and "go live" later when an admin flips the mode.
+		if (patchSegments != null && !patchSegments.isEmpty()) {
+			SidPurlUtils.ValidationResult vr = SidPurlUtils.validateAuthoritySegments(patchSegments);
+			if (!vr.valid()) {
+				throw new RelizaException("sidAuthoritySegments invalid: " + vr.error());
+			}
+		}
+		// ENABLED_STRICT additionally requires the effective segments to be non-empty.
+		if (effectiveMode == SidPurlMode.ENABLED_STRICT) {
+			SidPurlUtils.ValidationResult vr = SidPurlUtils.validateAuthoritySegments(effectiveSegments);
+			if (!vr.valid()) {
+				throw new RelizaException("sidPurlMode=ENABLED_STRICT requires valid sidAuthoritySegments: "
+						+ vr.error());
+			}
+		}
+
+		if (patchMode != null) {
+			settings.setSidPurlMode(patchMode);
+		}
+		if (patchSegments != null) {
+			// Normalize empty list to null for symmetry with ComponentService
+			// (ComponentService.java:~372) and PerspectiveService.updateSidPurl — stored
+			// shape is consistently `null` for "no segments", never `[]`.
+			settings.setSidAuthoritySegments(patchSegments.isEmpty() ? null : patchSegments);
+		}
+
+		// DISABLED means no segments — clear so stale data can't go live on a future toggle.
+		if (settings.getSidPurlModeOrDefault() == SidPurlMode.DISABLED) {
+			settings.setSidAuthoritySegments(null);
 		}
 	}
 

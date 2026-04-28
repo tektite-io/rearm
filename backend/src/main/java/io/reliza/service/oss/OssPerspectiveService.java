@@ -4,8 +4,12 @@
 
 package io.reliza.service.oss;
 
+import java.util.List;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.StreamSupport;
 
 import org.springframework.stereotype.Service;
 
@@ -47,5 +51,19 @@ public class OssPerspectiveService {
 	 */
 	public Optional<PerspectiveData> getPerspectiveData (UUID uuid) {
 		return Optional.empty();
+	}
+
+	/**
+	 * Fetch real perspectives by UUID in a single repo call. No fallback to product-derived
+	 * synthetics — UUIDs not in the perspective table are silently dropped. Use this on
+	 * hot paths that walk {@code ComponentData.perspectives}.
+	 */
+	public List<PerspectiveData> findRealPerspectivesByUuids(Set<UUID> uuids) {
+		if (uuids == null || uuids.isEmpty()) {
+			return List.of();
+		}
+		return StreamSupport.stream(repository.findAllById(uuids).spliterator(), false)
+				.map(PerspectiveData::dataFromRecord)
+				.collect(Collectors.toUnmodifiableList());
 	}
 }

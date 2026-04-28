@@ -29,6 +29,7 @@ import io.reliza.model.ArtifactData.DigestRecord;
 import io.reliza.model.ArtifactData.DigestScope;
 import io.reliza.model.tea.TeaChecksumType;
 import io.reliza.common.Utils.StripBom;
+import io.reliza.common.SidPurlUtils;
 import io.reliza.common.Utils;
 import io.reliza.exceptions.RelizaException;
 import io.reliza.model.BranchData;
@@ -148,10 +149,8 @@ public class DeliverableService {
 			DeliverableDto deliverableDto = Utils.OM.convertValue(deliverableItem,DeliverableDto.class);
 			deliverableDto.cleanLegacyDigests();
 			
-			String purl = null;
-			Optional<TeaIdentifier> purlId = Optional.empty();
-			if (null != deliverableDto.getIdentifiers()) purlId = deliverableDto.getIdentifiers().stream().filter(id -> id.getIdType() == TeaIdentifierType.PURL).findFirst();
-			if (purlId.isPresent()) purl = purlId.get().getIdValue();
+			String purl = SidPurlUtils.pickPreferredPurl(deliverableDto.getIdentifiers())
+					.map(TeaIdentifier::getIdValue).orElse(null);
 			RebomOptions rebomOptions = new RebomOptions(cd.getName(), od.getName(), version, ArtifactBelongsTo.DELIVERABLE, deliverableDto.getShaDigest(), StripBom.FALSE, purl);
 			var artIds = artifactService.uploadListOfArtifacts(od, arts, rebomOptions, wu);
 			deliverableDto.setArtifacts(artIds);			

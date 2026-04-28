@@ -12,6 +12,7 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 
 import io.reliza.common.CommonVariables;
 import io.reliza.common.CommonVariables.BranchSuffixMode;
+import io.reliza.common.CommonVariables.SidPurlOverride;
 import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.model.ComponentData.ComponentAuthentication;
 import io.reliza.model.ComponentData.ComponentKind;
@@ -19,6 +20,7 @@ import io.reliza.model.ComponentData.ComponentType;
 import io.reliza.model.ComponentData.GlobalInputEventRef;
 import io.reliza.model.ComponentData.ReleaseInputEvent;
 import io.reliza.model.ComponentData.ReleaseOutputEvent;
+import io.reliza.model.DeliverableData.BelongsToOrganization;
 import io.reliza.model.VersionAssignment.VersionTypeEnum;
 import io.reliza.model.tea.TeaIdentifier;
 import lombok.Builder;
@@ -76,4 +78,10 @@ public class ComponentDto {
 	private ComponentAuthentication authentication;
 	@JsonProperty
 	private BranchSuffixMode branchSuffixMode;
+	@JsonProperty
+	private SidPurlOverride sidPurlOverride;
+	@JsonProperty
+	private List<String> sidAuthoritySegments;
+	@JsonProperty
+	private BelongsToOrganization isInternal;
 }

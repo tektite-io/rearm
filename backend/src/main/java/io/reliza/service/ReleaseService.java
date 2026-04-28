@@ -63,6 +63,7 @@ import io.reliza.model.dto.ReleaseMetricsDto.FindingSourceDto;
 import io.reliza.model.dto.ReleaseMetricsDto.VulnerabilityDto;
 import io.reliza.model.dto.ReleaseMetricsDto.VulnerabilityReferenceDto;
 import io.reliza.model.dto.ReleaseMetricsDto.VulnerabilitySeverity;
+import io.reliza.common.SidPurlUtils;
 import io.reliza.common.Utils;
 import io.reliza.common.Utils.ArtifactBelongsTo;
 import io.reliza.common.Utils.RootComponentMergeMode;
@@ -368,10 +369,11 @@ public class ReleaseService {
 		}
 		
 		try {
-			List<TeaIdentifier> releaseIdentifiers = sharedReleaseService.resolveReleaseIdentifiersFromComponent(nextVersion, cd);
+			// Identifiers are derived inside ossReleaseService.createRelease via the
+			// orchestrator (Step 4 / D13). Auto-derive flow leaves the dto's identifiers
+			// null so the orchestrator runs unconditionally on the create-side.
 			releaseDtoBuilder.version(nextVersion)
-							.lifecycle(lifecycleResolved)
-							.identifiers(releaseIdentifiers);
+							.lifecycle(lifecycleResolved);
 			ossReleaseService.createRelease(releaseDtoBuilder.build(), wu);
 		} catch (RelizaException re) {
 			throw re;
@@ -623,9 +625,15 @@ public class ReleaseService {
 			var orgData = getOrganizationService.getOrganizationData(ord.get().getOrg()).get();
 			var cData = getComponentService.getComponentData(ord.get().getComponent()).get();
 			Component bomComponent = new Component();
-			bomComponent.setName(cData.getName());
+			String rootName = ord.get().getSidComponentName() != null
+					? ord.get().getSidComponentName()
+					: cData.getName();
+			bomComponent.setName(rootName);
 			bomComponent.setType(Type.APPLICATION);
 			bomComponent.setVersion(ord.get().getVersion());
+			SidPurlUtils.pickPreferredPurl(ord.get().getIdentifiers())
+					.map(TeaIdentifier::getIdValue)
+					.ifPresent(bomComponent::setPurl);
 			Utils.augmentRootBomComponent(orgData.getName(), bomComponent);
 			Utils.setRearmBomMetadata(bom, bomComponent);
 			BomJsonGenerator generator = BomGeneratorFactory.createJson(org.cyclonedx.Version.VERSION_16, bom);
@@ -780,10 +788,8 @@ public class ReleaseService {
 		if(bomIds.size() > 0){
 			ComponentData pd = getComponentService.getComponentData(rd.getComponent()).get();
 			OrganizationData od = getOrganizationService.getOrganizationData(rd.getOrg()).get();
-			String purl = null;
-			Optional<TeaIdentifier> purlId = Optional.empty();
-			if (null != rd.getIdentifiers()) purlId = rd.getIdentifiers().stream().filter(id -> id.getIdType() == TeaIdentifierType.PURL).findFirst();
-			if (purlId.isPresent()) purl = purlId.get().getIdValue();
+			String purl = SidPurlUtils.pickPreferredPurl(rd.getIdentifiers())
+					.map(TeaIdentifier::getIdValue).orElse(null);
 			var rebomOptions = new RebomOptions(pd.getName(), od.getName(), rd.getVersion(), rebomMergeOptions.belongsTo(), rebomMergeOptions.hash(), rebomMergeOptions.tldOnly(), rebomMergeOptions.ignoreDev(), rebomMergeOptions.structure(), rebomMergeOptions.notes(), StripBom.TRUE,"", "", purl, RootComponentMergeMode.FLATTEN_UNDER_NEW_ROOT);
 			rebomId = rebomService.mergeAndStoreBoms(bomIds, rebomOptions, od.getUuid());
 			
@@ -845,10 +851,8 @@ public class ReleaseService {
 						retRebomId = bomIds.getFirst();
 					} else {
 						var od = getOrganizationService.getOrganizationData(rd.getOrg()).get();
-						String purl = null;
-						Optional<TeaIdentifier> purlId = Optional.empty();
-						if (null != rd.getIdentifiers()) purlId = rd.getIdentifiers().stream().filter(id -> id.getIdType() == TeaIdentifierType.PURL).findFirst();
-						if (purlId.isPresent()) purl = purlId.get().getIdValue();
+						String purl = SidPurlUtils.pickPreferredPurl(rd.getIdentifiers())
+								.map(TeaIdentifier::getIdValue).orElse(null);
 						var rebomOptions = new RebomOptions(pd.getName(), od.getName(), rd.getVersion(),  rebomMergeOptions.belongsTo(), rebomMergeOptions.hash(), rebomMergeOptions.tldOnly(), rebomMergeOptions.ignoreDev(), rebomMergeOptions.structure(), rebomMergeOptions.notes(), StripBom.TRUE, "", "", purl);
 						UUID rebomId = rebomService.mergeAndStoreBoms(bomIds, rebomOptions, od.getUuid());
 						addRebom(rd, new ReleaseBom(rebomId, rebomMergeOptions), wu);
@@ -1188,17 +1192,9 @@ public class ReleaseService {
 			return;
 		}
 		
-		// Extract PURL from release identifiers
-		String purl = null;
-		if (null != rd.getIdentifiers()) {
-			Optional<TeaIdentifier> purlId = rd.getIdentifiers().stream()
-				.filter(id -> id.getIdType() == TeaIdentifierType.PURL)
-				.findFirst();
-			if (purlId.isPresent()) {
-				purl = purlId.get().getIdValue();
-			}
-		}
-		
+		String purl = SidPurlUtils.pickPreferredPurl(rd.getIdentifiers())
+				.map(TeaIdentifier::getIdValue).orElse(null);
+
 		// Upload artifacts
 		List<UUID> artIds = artifactService.uploadListOfArtifacts(
 			od, artifactsList,
@@ -1238,16 +1234,8 @@ public class ReleaseService {
 				throw new RelizaException("'artifacts' list cannot be empty in deliverableArtifacts");
 			}
 			
-			// Extract PURL from deliverable identifiers
-			String purl = null;
-			if (null != dd.getIdentifiers()) {
-				Optional<TeaIdentifier> purlId = dd.getIdentifiers().stream()
-					.filter(id -> id.getIdType() == TeaIdentifierType.PURL)
-					.findFirst();
-				if (purlId.isPresent()) {
-					purl = purlId.get().getIdValue();
-				}
-			}
+			String purl = SidPurlUtils.pickPreferredPurl(dd.getIdentifiers())
+					.map(TeaIdentifier::getIdValue).orElse(null);
 			
 			// Extract digest from deliverable's software metadata
 			String hash = null;
@@ -1861,11 +1849,21 @@ public class ReleaseService {
 		ComponentData componentData = getComponentService.getComponentData(releaseData.getComponent()).orElse(null);
 	
 		Component bomComponent = new Component();
-		if (componentData != null) {
-			bomComponent.setName(componentData.getName());
+		// Prefer the snapshot name so a post-creation rename doesn't drift away from
+		// the sid PURL's encoded name; fall back to the current component name.
+		String rootName = releaseData.getSidComponentName() != null
+				? releaseData.getSidComponentName()
+				: (componentData != null ? componentData.getName() : null);
+		if (rootName != null) {
+			bomComponent.setName(rootName);
 		}
 		bomComponent.setType(Type.APPLICATION);
 		bomComponent.setVersion(releaseData.getVersion());
+		// Set purl only when the release actually carries one — getPreferredBomIdentifier
+		// falls back to the release UUID string, which isn't a valid PURL.
+		SidPurlUtils.pickPreferredPurl(releaseData.getIdentifiers())
+				.map(TeaIdentifier::getIdValue)
+				.ifPresent(bomComponent::setPurl);
 		String orgName = orgData != null ? orgData.getName() : null;
 		Utils.augmentRootBomComponent(orgName, bomComponent);
 		Utils.setRearmBomMetadata(bom, bomComponent);
@@ -2003,19 +2001,7 @@ public class ReleaseService {
 				if (relOpt.isPresent()) {
 					ReleaseData rd = relOpt.get();
 					
-					// Determine bom-ref: use PURL if available, otherwise use release UUID
-					String bomRef = null;
-					if (rd.getIdentifiers() != null) {
-						Optional<TeaIdentifier> purlId = rd.getIdentifiers().stream()
-								.filter(id -> id.getIdType() == TeaIdentifierType.PURL)
-								.findFirst();
-						if (purlId.isPresent()) {
-							bomRef = purlId.get().getIdValue();
-						}
-					}
-					if (bomRef == null) {
-						bomRef = releaseUuid.toString();
-					}
+					String bomRef = rd.getPreferredBomIdentifier();
 					releaseBomRefMap.put(releaseUuid, bomRef);
 					
 					// Create component using OBOM-like logic
@@ -2024,9 +2010,16 @@ public class ReleaseService {
 					releaseComponent.setBomRef(bomRef);
 					releaseComponent.setVersion(rd.getVersion());
 					
+					// Prefer the per-release sidComponentName snapshot so a post-sid-emission
+					// component rename doesn't produce a BOM where metadata.component.name
+					// and the sid PURL disagree (D17 write-once-at-create invariant). The
+					// OBOM root path does the same — keep them consistent.
 					Optional<ComponentData> compOpt = getComponentService.getComponentData(rd.getComponent());
-					if (compOpt.isPresent()) {
-						releaseComponent.setName(compOpt.get().getName());
+					String childName = rd.getSidComponentName() != null
+							? rd.getSidComponentName()
+							: compOpt.map(ComponentData::getName).orElse(null);
+					if (childName != null) {
+						releaseComponent.setName(childName);
 					}
 					// Set PURL if available (bomRef is guaranteed non-null at this point)
 					if (bomRef.startsWith("pkg:")) {

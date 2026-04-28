@@ -17,10 +17,12 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.reliza.common.CommonVariables;
 import io.reliza.common.CommonVariables.ApprovalState;
 import io.reliza.common.CommonVariables.BranchSuffixMode;
+import io.reliza.common.CommonVariables.SidPurlOverride;
 import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.common.CommonVariables.VisibilitySetting;
 import io.reliza.common.Utils;
 import io.reliza.model.BranchData.BranchType;
+import io.reliza.model.DeliverableData.BelongsToOrganization;
 import io.reliza.model.ReleaseData.ReleaseLifecycle;
 import io.reliza.model.VersionAssignment.VersionTypeEnum;
 import io.reliza.model.dto.CreateComponentDto;
@@ -239,8 +241,29 @@ public class ComponentData extends RelizaDataParent implements RelizaObject {
 	@JsonAlias("branchPrefixMode")
 	private BranchSuffixMode branchSuffixMode;
 
+	/** Component-level sid override. Null/INHERIT defers to perspective or org. */
+	@JsonProperty
+	private SidPurlOverride sidPurlOverride;
+
+	/** Component-level authority segments. Take effect only when sid is enabled at this or a higher level. */
+	@JsonProperty
+	private List<String> sidAuthoritySegments;
+
+	/**
+	 * Internal/external classification. EXTERNAL components never receive a
+	 * platform-stamped sid PURL — that would falsify a vendor claim on third-party software.
+	 * Nullable for back-compat with legacy rows; use {@link #getIsInternalOrDefault()} to read.
+	 */
+	@JsonProperty
+	private BelongsToOrganization isInternal;
+
 	public List<TeaIdentifier> getIdentifiers () {
 		return new LinkedList<>(this.identifiers);
+	}
+
+	/** Treats null as INTERNAL for back-compat with legacy rows. */
+	public BelongsToOrganization getIsInternalOrDefault() {
+		return isInternal != null ? isInternal : BelongsToOrganization.INTERNAL;
 	}
 	
 	public static ComponentData componentDataFactory(CreateComponentDto cpd) {
@@ -259,6 +282,15 @@ public class ComponentData extends RelizaDataParent implements RelizaObject {
 		if (null != cpd.getKind()) cd.setKind(cpd.getKind());
 		if (null != cpd.getRepoPath()) cd.setRepoPath(cpd.getRepoPath());
 		if (null != cpd.getBranchSuffixMode()) cd.setBranchSuffixMode(cpd.getBranchSuffixMode());
+		if (null != cpd.getSidPurlOverride()) {
+			// INHERIT clears the override (defers to higher level) — store as null for cleaner record
+			cd.setSidPurlOverride(cpd.getSidPurlOverride() == SidPurlOverride.INHERIT
+					? null : cpd.getSidPurlOverride());
+		}
+		if (null != cpd.getSidAuthoritySegments()) cd.setSidAuthoritySegments(cpd.getSidAuthoritySegments());
+		// isInternal defaults to INTERNAL on create when the caller doesn't supply it,
+		// so today's behavior is preserved for clients that don't know about the field.
+		cd.setIsInternal(cpd.getIsInternal() != null ? cpd.getIsInternal() : BelongsToOrganization.INTERNAL);
 		return cd;
 	}
 	

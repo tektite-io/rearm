@@ -27,7 +27,9 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import io.reliza.common.CommonVariables;
+import io.reliza.common.SidPurlUtils;
 import io.reliza.common.CommonVariables.ReleaseEventType;
+import io.reliza.common.CommonVariables.SidPurlMode;
 import io.reliza.common.CommonVariables.StatusEnum;
 import io.reliza.common.CommonVariables.TableName;
 import io.reliza.common.Utils;
@@ -43,7 +45,9 @@ import io.reliza.model.BranchData.ChildComponent;
 import io.reliza.model.ComponentData;
 import io.reliza.model.ComponentData.ConditionGroup;
 import io.reliza.model.GenericReleaseData;
+import io.reliza.model.OrganizationData;
 import io.reliza.model.tea.TeaIdentifier;
+import io.reliza.model.tea.TeaIdentifierType;
 import io.reliza.model.ParentRelease;
 import io.reliza.model.Release;
 import io.reliza.model.ReleaseData;
@@ -70,6 +74,7 @@ import io.reliza.service.GetComponentService;
 import io.reliza.service.GetSourceCodeEntryService;
 import io.reliza.service.NotificationService;
 import io.reliza.dto.ChangelogRecords.CommitRecord;
+import io.reliza.service.GetOrganizationService;
 import io.reliza.service.SharedReleaseService;
 import io.reliza.service.SourceCodeEntryService;
 import io.reliza.service.VariantService;
@@ -102,7 +107,10 @@ public class OssReleaseService {
 	
 	@Autowired
 	private GetComponentService getComponentService;
-	
+
+	@Autowired
+	private GetOrganizationService getOrganizationService;
+
 	@Autowired
 	private VersionAssignmentService versionAssignmentService;
 	
@@ -357,23 +365,59 @@ public class OssReleaseService {
 		}
 	}
 	
+	/**
+	 * Fills identifiers on releases that have none. Releases that already carry any
+	 * identifier are left alone; v1 does not productize a "rebuild sid on identified
+	 * releases" flow.
+	 */
 	@Transactional
-	public ReleaseData updateReleaseIdentifiersFromComponent (ReleaseData rd, WhoUpdated wu) {
+	public ReleaseData updateReleaseIdentifiersFromComponent (ReleaseData rd, WhoUpdated wu) throws RelizaException {
 		if (null == rd.getIdentifiers() || rd.getIdentifiers().isEmpty()) {
 			Release r = sharedReleaseService.getRelease(rd.getUuid()).get();
-			var identifiers = sharedReleaseService.resolveReleaseIdentifiersFromComponent(rd);
+			ComponentData cd = getComponentService.getComponentData(rd.getComponent()).get();
+			final UUID orgUuid = rd.getOrg(); // effectively final for the lambda below
+			OrganizationData org = getOrganizationService.getOrganizationData(orgUuid)
+					.orElseThrow(() -> new RelizaException("Organization not found: " + orgUuid));
+			var buildResult = sharedReleaseService.buildReleaseIdentifiers(cd, org, rd.getVersion(),
+					rd.getSidComponentName(), null);
+			List<TeaIdentifier> identifiers = buildResult.identifiers();
 			if (null != identifiers && !identifiers.isEmpty()) {
 				rd.setIdentifiers(identifiers);
+				if (buildResult.sidComponentNameSnapshot() != null) {
+					rd.setSidComponentName(buildResult.sidComponentNameSnapshot());
+				}
 				r = saveRelease(r, rd, wu, false);
 				rd = ReleaseData.dataFromRecord(r);
 			}
 		}
 		return rd;
 	}
-	
-	public void updateComponentReleasesWithIdentifiers (UUID componentUuid, WhoUpdated wu) {
+
+	public void updateComponentReleasesWithIdentifiers (UUID componentUuid, WhoUpdated wu) throws RelizaException {
+		// Top-of-batch org policy validation (design §4.3). Fail before loading any
+		// release row when the org is ENABLED_STRICT with empty/invalid authority
+		// segments — otherwise the first per-release resolve would throw a release-
+		// scoped error for what is actually an org-scoped misconfiguration, after we'd
+		// already paid the cost of loading up to 100k releases.
+		ComponentData cd = getComponentService.getComponentData(componentUuid)
+				.orElseThrow(() -> new RelizaException("Component not found: " + componentUuid));
+		OrganizationData org = getOrganizationService.getOrganizationData(cd.getOrg())
+				.orElseThrow(() -> new RelizaException("Organization not found: " + cd.getOrg()));
+		OrganizationData.Settings settings = org.getSettings();
+		if (settings != null && settings.getSidPurlModeOrDefault() == SidPurlMode.ENABLED_STRICT) {
+			SidPurlUtils.ValidationResult vr = SidPurlUtils.validateAuthoritySegments(
+					settings.getSidAuthoritySegments());
+			if (!vr.valid()) {
+				throw new RelizaException("Cannot refresh component identifiers: org sidPurlMode="
+						+ "ENABLED_STRICT requires valid sidAuthoritySegments (" + vr.error() + ")");
+			}
+		}
+
 		var compRDs = sharedReleaseService.listReleaseDatasOfComponent(componentUuid, 100000, 0);
-		compRDs.forEach(rd -> updateReleaseIdentifiersFromComponent(rd, wu));
+		// for-loop (not forEach) so the checked RelizaException propagates and aborts the batch.
+		for (ReleaseData rd : compRDs) {
+			updateReleaseIdentifiersFromComponent(rd, wu);
+		}
 	}
 	
 	@Transactional
@@ -439,6 +483,13 @@ public class OssReleaseService {
 
 	private Release doUpdateRelease (final Release r, ReleaseData rData, ReleaseDto releaseDto, WhoUpdated wu) throws RelizaException {
 		log.debug("updating exisiting rd, with dto: {}", releaseDto);
+		// sidComponentName is system-controlled. Reject mutation; allow idempotent pass.
+		if (releaseDto.getSidComponentName() != null
+				&& !releaseDto.getSidComponentName().equals(rData.getSidComponentName())) {
+			throw new RelizaException("sidComponentName is immutable once set and may not be changed via release update "
+					+ "(release " + r.getUuid() + ", existing=" + rData.getSidComponentName()
+					+ ", attempted=" + releaseDto.getSidComponentName() + ")");
+		}
 		List<UuidDiff> artDiff = Utils.diffUuidLists(rData.getArtifacts(), releaseDto.getArtifacts());
 		if (!artDiff.isEmpty()) {
 			rData.setArtifacts(releaseDto.getArtifacts());
@@ -528,10 +579,30 @@ public class OssReleaseService {
 		}
 	
 		if (null != releaseDto.getIdentifiers()) {
+			// sid PURLs are platform-controlled. Reject sid set changes; allow idempotent pass.
+			Set<String> dtoSidPurls = collectSidPurlValues(releaseDto.getIdentifiers());
+			Set<String> existingSidPurls = collectSidPurlValues(rData.getIdentifiers());
+			if (!dtoSidPurls.equals(existingSidPurls)) {
+				throw new RelizaException("sid PURLs are platform-controlled and may not be added, removed, "
+						+ "or changed via release update (release " + r.getUuid()
+						+ ", existing=" + existingSidPurls + ", attempted=" + dtoSidPurls + ")");
+			}
 			rData.setIdentifiers(releaseDto.getIdentifiers());
 		}
 		log.debug("saving release with rData: {}", rData);
 		return saveRelease(r, rData, wu);
+	}
+
+	/** Collect {@code idValue}s for sid-typed PURL identifiers. Null-safe. */
+	private static Set<String> collectSidPurlValues(List<TeaIdentifier> identifiers) {
+		if (identifiers == null || identifiers.isEmpty()) {
+			return Set.of();
+		}
+		return identifiers.stream()
+				.filter(ti -> ti != null && ti.getIdType() == TeaIdentifierType.PURL)
+				.map(TeaIdentifier::getIdValue)
+				.filter(SidPurlUtils::isSidPurl)
+				.collect(Collectors.toUnmodifiableSet());
 	}
 	
 	@Transactional
@@ -826,7 +897,7 @@ public class OssReleaseService {
 		}
 
 		// Get new version. Wrapper retries on (branch, version) unique-constraint
-		// collisions � two concurrent auto-integrations on the same product feature
+		// collisions � two concurrent auto-integrations on the same product feature
 		// set will otherwise both compute the same next version and one will fail.
 		Optional<VersionAssignment> ova = versionAssignmentService.getSetNewVersionWrapper(
 			featureSet.getUuid(),
@@ -1142,6 +1213,47 @@ public class OssReleaseService {
 	}
 	
 
+	/**
+	 * Seed {@code releaseDto} with the stored sid identity so rebuild / PENDING-update
+	 * passes the snapshot + sid-PURL immutability checks in {@link #doUpdateRelease}.
+	 * sid identity is computed exactly once, at creation, and never re-derived; rebuild
+	 * after a component rename or org-authority change must keep the original identity
+	 * or it would crash the update flow.
+	 *
+	 * <p>Caller-supplied sid PURLs are dropped silently; existing ones from {@code existingRd}
+	 * are re-attached. Caller-supplied non-sid identifiers (CPE, TEI, etc.) flow through.
+	 * If the caller passed null identifiers, leave that null so the update path skips
+	 * identifier handling entirely and the stored list survives intact.
+	 *
+	 * <p><b>Caller contract for non-null identifiers:</b> when {@code releaseDto.identifiers}
+	 * is non-null, the caller is taking ownership of the entire non-sid identifier set —
+	 * stored non-sid identifiers (carryover PURLs, CPEs, TEIs) <em>not</em> reasserted by
+	 * the caller will be wiped by {@link #doUpdateRelease}. Concretely, passing
+	 * {@code [vendor_sid_only]} on a release that has stored carryover PURLs will result
+	 * in: caller's sid stripped here → empty list seeded → existing sid re-attached →
+	 * {@code doUpdateRelease} sees identical sid sets on both sides and overwrites the
+	 * stored list with the empty merge, losing the carryover. Callers that want to
+	 * preserve stored non-sid identifiers must pass {@code null} (the no-op signal).
+	 */
+	private static void seedDtoWithExistingSidIdentity(ReleaseDto releaseDto, ReleaseData existingRd) {
+		releaseDto.setSidComponentName(existingRd.getSidComponentName());
+
+		if (releaseDto.getIdentifiers() == null) {
+			return;
+		}
+		List<TeaIdentifier> merged = new LinkedList<>(releaseDto.getIdentifiers());
+		merged.removeIf(ti -> ti != null && ti.getIdType() == TeaIdentifierType.PURL
+				&& SidPurlUtils.isSidPurl(ti.getIdValue()));
+		List<TeaIdentifier> existing = existingRd.getIdentifiers();
+		if (existing != null) {
+			existing.stream()
+					.filter(ti -> ti != null && ti.getIdType() == TeaIdentifierType.PURL
+							&& SidPurlUtils.isSidPurl(ti.getIdValue()))
+					.forEach(merged::add);
+		}
+		releaseDto.setIdentifiers(merged);
+	}
+
 	@Transactional
 	public Release createRelease (ReleaseDto releaseDto, WhoUpdated wu) throws RelizaException {
 		return createRelease(releaseDto, wu, false);
@@ -1181,10 +1293,32 @@ public class OssReleaseService {
 			}
 		}
 		
-		if (null == releaseDto.getIdentifiers() || releaseDto.getIdentifiers().isEmpty()) {
-			ComponentData cd = getComponentService.getComponentData(releaseDto.getComponent()).get();
-			List<TeaIdentifier> releaseIdentifiers = sharedReleaseService.resolveReleaseIdentifiersFromComponent(releaseDto.getVersion(), cd);
-			releaseDto.setIdentifiers(releaseIdentifiers);
+		// --- sid identity ---
+		// Look up version assignment first so we know whether this is a fresh create or
+		// an update; the orchestrator runs only on fresh creates so existing sid identity
+		// is never re-derived (write-once invariant).
+		ComponentData cd = getComponentService.getComponentData(releaseDto.getComponent()).get();
+		OrganizationData org = getOrganizationService.getOrganizationData(releaseDto.getOrg())
+				.orElseThrow(() -> new RelizaException("Organization not found: " + releaseDto.getOrg()));
+
+		Optional<VersionAssignment> ova = versionAssignmentService.getVersionAssignment(
+				releaseDto.getComponent(), releaseDto.getVersion());
+		Optional<ReleaseData> existingReleaseData = (ova.isPresent() && null != ova.get().getRelease())
+				? sharedReleaseService.getReleaseData(ova.get().getRelease())
+				: Optional.empty();
+
+		if (existingReleaseData.isPresent()) {
+			// Rebuild / PENDING-update — preserve stored sid identity, do not re-derive.
+			seedDtoWithExistingSidIdentity(releaseDto, existingReleaseData.get());
+		} else {
+			// Fresh release — orchestrator runs even when caller supplied identifiers,
+			// so non-PURL identifiers (e.g. CPE) still gain a sid PURL.
+			var buildResult = sharedReleaseService.buildReleaseIdentifiers(cd, org, releaseDto.getVersion(),
+					releaseDto.getSidComponentName(), releaseDto.getIdentifiers());
+			releaseDto.setIdentifiers(buildResult.identifiers());
+			if (buildResult.sidComponentNameSnapshot() != null) {
+				releaseDto.setSidComponentName(buildResult.sidComponentNameSnapshot());
+			}
 		}
 
 		ReleaseData rData = ReleaseData.releaseDataFactory(releaseDto);
@@ -1192,15 +1326,11 @@ public class OssReleaseService {
 				ZonedDateTime.now(), wu);
 		rData.addUpdateEvent(rue);
 
-		// consume or create version assignment
-		Optional<VersionAssignment> ova = versionAssignmentService.getVersionAssignment(rData.getComponent(), rData.getVersion());
 		if (ova.isPresent() && null != ova.get().getRelease()) {
 			//Release already exists, proceeding with an update to the existing release
-			Optional<ReleaseData> ord = sharedReleaseService.getReleaseData(ova.get().getRelease());
-			if(ord.isEmpty())
-				throw new RelizaException("Cannot find the existing release data associated with the version = " + rData.getVersion());
-			
-			ReleaseData existingRd = ord.get();
+			final String dtoVersion = rData.getVersion(); // capture for lambda — rData is reassigned below
+			ReleaseData existingRd = existingReleaseData.orElseThrow(() ->
+					new RelizaException("Cannot find the existing release data associated with the version = " + dtoVersion));
 			
 			// If rebuildRelease is true, strip and rebuild the release regardless of lifecycle
 			if (rebuildRelease) {
