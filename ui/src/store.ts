@@ -536,6 +536,8 @@ const storeObject : any = {
                                     justificationMandatory
                                     branchSuffixMode
                                     vexComplianceFramework
+                                    sidPurlMode
+                                    sidAuthoritySegments
                                 }
                             }
                         }`,
@@ -932,6 +934,13 @@ const storeObject : any = {
             return data.data.updateInstance
         },
         async updateComponent (context : any, component : any) {
+            // Trim segments and drop empties — symmetry with org / perspective save paths,
+            // and the server rejects leading/trailing whitespace anyway.
+            const trimmedSegments = Array.isArray(component.sidAuthoritySegments)
+                ? component.sidAuthoritySegments
+                    .map((s: any) => (s ?? '').toString().trim())
+                    .filter((s: string) => s.length > 0)
+                : null
             const compUpdObject = {
                 uuid: component.uuid,
                 name: component.name,
@@ -948,9 +957,12 @@ const storeObject : any = {
                 releaseInputTriggers: component.releaseInputTriggers,
                 globalInputEventRefs: component.globalInputEventRefs?.map(({ uuid, overrideOutputEventsLocally, outputEventsOverride }: any) => ({ uuid, overrideOutputEventsLocally, outputEventsOverride })),
                 identifiers: component.identifiers?.map(({ idType, idValue }: any) => ({ idType, idValue })),
-                authentication: component.authentication ? { login: component.authentication.login, password: component.authentication.password, type: component.authentication.type } : null
+                authentication: component.authentication ? { login: component.authentication.login, password: component.authentication.password, type: component.authentication.type } : null,
+                // INHERIT explicitly clears any prior override (server normalizes to null).
+                sidPurlOverride: component.sidPurlOverride || 'INHERIT',
+                sidAuthoritySegments: trimmedSegments,
+                isInternal: component.isInternal || null
             }
-            console.log(compUpdObject)
             const data = await graphqlClient.mutate({
                 mutation: graphqlQueries.ComponentMutate,
                 variables: {

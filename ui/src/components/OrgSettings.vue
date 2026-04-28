@@ -902,8 +902,41 @@
                                         required />
                                 </n-form-item>
                                 <n-space>
-                                    <n-button :loading="processingMode" @click="updatePerspectiveName" type="success">Save</n-button>
+                                    <n-button :loading="processingMode" @click="updatePerspectiveName" type="success">Save Name</n-button>
                                     <n-button type="error" @click="cancelEditPerspective">Cancel</n-button>
+                                </n-space>
+
+                                <n-divider style="margin: 16px 0;" />
+                                <h6 style="margin-bottom: 8px;">sid PURL Override</h6>
+                                <p class="text-muted" style="margin-bottom: 12px; font-size: 0.9em;">
+                                    Override sid PURL emission for components belonging to this perspective.
+                                    Only honored under "Enabled — flexible" org mode (D3) and only on real perspectives.
+                                </p>
+                                <n-form-item label="Override" label-placement="top">
+                                    <n-select
+                                        v-model:value="editingPerspective.sidPurlOverride"
+                                        :options="sidPurlOverrideOptions"
+                                        :disabled="perspectiveSidOverrideLocked"
+                                        style="max-width: 400px;" />
+                                </n-form-item>
+                                <p v-if="perspectiveSidOverrideLocked" class="text-muted" style="font-size: 0.85em; margin-top: -8px; margin-bottom: 12px;">
+                                    {{ perspectiveSidOverrideLockedReason }}
+                                </p>
+                                <n-form-item label="Authority Segments (optional)" label-placement="top">
+                                    <n-dynamic-input
+                                        v-model:value="editingPerspective.sidAuthoritySegments"
+                                        :on-create="() => ''"
+                                        :disabled="isProductDerivedPerspective"
+                                        placeholder='e.g. "tenant.example.com"' />
+                                </n-form-item>
+                                <n-space>
+                                    <n-button
+                                        :loading="savingPerspectiveSid"
+                                        :disabled="isProductDerivedPerspective"
+                                        @click="savePerspectiveSid"
+                                        type="primary">
+                                        Save sid Override
+                                    </n-button>
                                 </n-space>
                             </n-form>
                         </n-card>
@@ -1007,6 +1040,67 @@ Spec: https://www.cisa.gov/sites/default/files/2023-04/minimum-requirements-for-
                             </div>
                         </n-form-item>
 
+                        <n-divider style="margin: 12px 0;" />
+                        <h6 style="margin-bottom: 8px;">Software Identification (sid PURL)</h6>
+                        <p class="text-muted" style="margin-bottom: 12px;">
+                            sid is a CPE-successor PURL type for vendor-asserted software identity.
+                            <strong>Enabling sid is forward-only</strong> — releases created before the
+                            toggle keep their existing identifiers unchanged. EXTERNAL components
+                            never receive a platform-stamped sid PURL.
+                        </p>
+
+                        <n-form-item>
+                            <template #label>
+                                <span style="display: inline-flex; align-items: center; gap: 6px;">
+                                    <span>sid PURL Mode</span>
+                                    <n-tooltip trigger="hover" placement="right">
+                                        <template #trigger>
+                                            <n-icon size="16" style="cursor: help;"><QuestionMark /></n-icon>
+                                        </template>
+                                        <div style="max-width: 700px; white-space: pre-line;">{{ sidPurlModeTooltip }}</div>
+                                    </n-tooltip>
+                                </span>
+                            </template>
+                            <div style="display: flex; flex-direction: column; width: 100%;">
+                                <n-select
+                                    v-model:value="orgSettings.sidPurlMode"
+                                    :options="sidPurlModeOptions"
+                                    style="max-width: 480px;" />
+                                <span class="text-muted" style="margin-top: 4px;">
+                                    Current: {{ sidPurlModeLabels[orgSettings.sidPurlMode] }}
+                                </span>
+                            </div>
+                        </n-form-item>
+
+                        <n-form-item v-if="sidPurlIsEnabled">
+                            <template #label>
+                                <span style="display: inline-flex; align-items: center; gap: 6px;">
+                                    <span>
+                                        Authority Segments
+                                        <span v-if="sidPurlSegmentsRequired" style="color: #d03050;">*</span>
+                                    </span>
+                                    <n-tooltip trigger="hover" placement="right">
+                                        <template #trigger>
+                                            <n-icon size="16" style="cursor: help;"><QuestionMark /></n-icon>
+                                        </template>
+                                        <div style="max-width: 700px; white-space: pre-line;">{{ sidPurlAuthorityTooltip }}</div>
+                                    </n-tooltip>
+                                </span>
+                            </template>
+                            <div style="display: flex; flex-direction: column; width: 100%; max-width: 600px;">
+                                <n-dynamic-input
+                                    v-model:value="orgSettings.sidAuthoritySegments"
+                                    :on-create="() => ''"
+                                    placeholder='e.g. "reliza.io" or "Acme Robotics"' />
+                                <span class="text-muted" style="margin-top: 4px;">
+                                    First segment is the authority; subsequent segments are publisher / business unit / product line.
+                                </span>
+                                <span v-if="sidPurlAuthorityRegistryWarning" class="text-warning" style="margin-top: 4px; color: #f0a020;">
+                                    The first segment has no dot — the upstream sid spec requires registry-form authorities to be registered in the PURL registry. Domain-form authorities (e.g. <code>reliza.io</code>) are self-asserted and don't need registration.
+                                </span>
+                            </div>
+                        </n-form-item>
+
                         <n-space>
                             <n-button type="primary" @click="saveOrgSettings" :loading="savingOrgSettings">
                                 Save Settings
@@ -1069,7 +1163,7 @@ Spec: https://www.cisa.gov/sites/default/files/2023-04/minimum-requirements-for-
 </template>
   
 <script lang="ts" setup>
-import { NSpace, NIcon, NCheckbox, NCheckboxGroup, NDropdown, NInput, NModal, NCard, NDataTable, NForm, NInputGroup, NButton, NFormItem, NSelect, NRadioGroup, NRadioButton, NTabs, NTabPane, NTooltip, NotificationType, useNotification, NFlex, NH5, NText, NGrid, NGi, DataTableColumns, NDynamicInput, NSwitch, NInputNumber, NAlert, NRadio } from 'naive-ui'
+import { NSpace, NIcon, NCheckbox, NCheckboxGroup, NDropdown, NInput, NModal, NCard, NDataTable, NForm, NInputGroup, NButton, NFormItem, NSelect, NRadioGroup, NRadioButton, NTabs, NTabPane, NTooltip, NotificationType, useNotification, NFlex, NH5, NText, NGrid, NGi, DataTableColumns, NDynamicInput, NSwitch, NInputNumber, NAlert, NRadio, NDivider } from 'naive-ui'
 import { ComputedRef, h, ref, Ref, computed, onMounted, reactive } from 'vue'
 import type { SelectOption } from 'naive-ui'
 import { useStore } from 'vuex'
@@ -1247,10 +1341,16 @@ const ignoreViolation = reactive({
 const savingIgnoreViolation = ref(false)
 
 // Admin Settings - Organization Settings
+type SidPurlMode = 'DISABLED' | 'ENABLED_STRICT' | 'ENABLED_FLEXIBLE'
+
 const orgSettings = reactive({
     justificationMandatory: false,
     branchSuffixMode: 'APPEND' as 'APPEND' | 'NO_APPEND' | 'APPEND_EXCEPT_FOLLOW_VERSION',
-    vexComplianceFramework: 'NONE' as 'NONE' | 'CISA'
+    vexComplianceFramework: 'NONE' as 'NONE' | 'CISA',
+    sidPurlMode: 'DISABLED' as SidPurlMode,
+    // Authority segments are stored as a list of decoded strings ("Acme Robotics",
+    // not "Acme%20Robotics"). The backend percent-encodes when emitting sid PURLs.
+    sidAuthoritySegments: [] as string[]
 })
 
 const vexComplianceFrameworkOptions = [
@@ -1275,6 +1375,53 @@ const branchSuffixModeTooltip = [
     `${branchSuffixModeLabels.NO_APPEND}: no branch suffix; version conflicts resolved via -0, -1, -2...`,
     `${branchSuffixModeLabels.APPEND_EXCEPT_FOLLOW_VERSION}: append suffix unless the branch has a "follow version" dependency.`
 ].join('\n')
+
+const sidPurlModeLabels: Record<SidPurlMode, string> = {
+    DISABLED: 'Disabled',
+    ENABLED_STRICT: 'Enabled — strict (org authority for every internal component)',
+    ENABLED_FLEXIBLE: 'Enabled — flexible (components and perspectives may override)'
+}
+
+const sidPurlModeOptions = [
+    { label: sidPurlModeLabels.DISABLED, value: 'DISABLED' },
+    { label: sidPurlModeLabels.ENABLED_STRICT, value: 'ENABLED_STRICT' },
+    { label: sidPurlModeLabels.ENABLED_FLEXIBLE, value: 'ENABLED_FLEXIBLE' }
+]
+
+const sidPurlModeTooltip = [
+    'sid (Software IDentification) is a CPE-successor PURL type for vendor-asserted software identity.',
+    '',
+    'Disabled: no platform sid emission; tenant-supplied pkg:sid/... values pass through unchanged.',
+    'Enabled — strict: every release of an INTERNAL component gets a sid PURL using the org authority. Component/perspective overrides not honored.',
+    'Enabled — flexible: same default, but components and (SaaS) perspectives may override.',
+    '',
+    'Forward-only: pre-existing releases retain their identifiers unchanged. EXTERNAL components never receive a platform-stamped sid PURL.'
+].join('\n')
+
+const sidPurlAuthorityTooltip = [
+    'Decoded authority segments — the platform encodes spaces and special characters at emission time.',
+    '',
+    'First segment is the authority:',
+    '  - Domain form (contains a dot, e.g. "reliza.io"): self-asserted, no registration needed.',
+    '  - Registry form (no dot, e.g. "myproject"): must be registered in the upstream PURL registry.',
+    '',
+    'Additional segments are publisher / business-unit / product-line context.',
+    'Example: ["acme.com", "Acme Robotics"] -> pkg:sid/acme.com/Acme%20Robotics/<component>@<version>'
+].join('\n')
+
+const sidPurlOverrideOptions = [
+    { label: 'Inherit from organization', value: 'INHERIT' },
+    { label: 'Enable for this perspective', value: 'ENABLE' },
+    { label: 'Disable for this perspective', value: 'DISABLE' }
+]
+
+const sidPurlIsEnabled = computed(() => orgSettings.sidPurlMode !== 'DISABLED')
+const sidPurlSegmentsRequired = computed(() => orgSettings.sidPurlMode === 'ENABLED_STRICT')
+const sidPurlAuthorityRegistryWarning = computed(() => {
+    const first = orgSettings.sidAuthoritySegments[0]
+    return !!first && !first.includes('.')
+})
+
 const savingOrgSettings = ref(false)
 
 const myUser: ComputedRef<any> = computed((): any => store.getters.myuser)
@@ -1853,8 +2000,40 @@ const selectedPerspectiveType: Ref<string> = ref('')
 const perspectiveComponents: Ref<any[]> = ref([])
 const editingPerspective: Ref<any> = ref({
     uuid: '',
-    name: ''
+    name: '',
+    type: 'PERSPECTIVE',
+    sidPurlOverride: 'INHERIT',
+    sidAuthoritySegments: [] as string[]
 })
+
+// Read the live org mode from the store so this section works regardless of whether
+// the Admin Settings tab has been visited (which is what populates the orgSettings form state).
+const orgSidPurlMode = computed((): string => myorg.value?.settings?.sidPurlMode || 'DISABLED')
+
+// Product-derived perspectives never carry sid override fields. This locks the entire section.
+const isProductDerivedPerspective = computed((): boolean => editingPerspective.value.type !== 'PERSPECTIVE')
+
+// Override select is also locked when the org isn't ENABLED_FLEXIBLE (overrides not honored).
+// Authority segments stay editable regardless — segments are data, not policy, and admins
+// can pre-stage them ahead of a future mode flip.
+const perspectiveSidOverrideLocked = computed((): boolean => {
+    return isProductDerivedPerspective.value || orgSidPurlMode.value !== 'ENABLED_FLEXIBLE'
+})
+
+const perspectiveSidOverrideLockedReason = computed((): string => {
+    if (isProductDerivedPerspective.value) {
+        return 'sid override is only configurable on real perspectives. Product-derived perspectives never carry sid override fields.'
+    }
+    if (orgSidPurlMode.value === 'DISABLED') {
+        return 'Override locked because the organization has sid PURL turned off. Authority segments below are still editable; the override only takes effect once sid is enabled.'
+    }
+    if (orgSidPurlMode.value === 'ENABLED_STRICT') {
+        return 'Override locked because the organization is in "Enabled — strict" mode (no per-perspective overrides). Switch to "Enabled — flexible" in Admin Settings to enable overrides.'
+    }
+    return ''
+})
+
+const savingPerspectiveSid = ref(false)
 
 const perspectiveComponentColumns = [
     {
@@ -2007,6 +2186,8 @@ async function loadPerspectives() {
                         org
                         createdDate
                         type
+                        sidPurlOverride
+                        sidAuthoritySegments
                     }
                 }`,
             variables: {
@@ -2230,9 +2411,60 @@ async function addProductToPerspective() {
 function editPerspective(perspective: any) {
     editingPerspective.value = {
         uuid: perspective.uuid,
-        name: perspective.name
+        name: perspective.name,
+        type: perspective.type || 'PERSPECTIVE',
+        sidPurlOverride: perspective.sidPurlOverride || 'INHERIT',
+        sidAuthoritySegments: Array.isArray(perspective.sidAuthoritySegments)
+            ? [...perspective.sidAuthoritySegments]
+            : []
     }
     showEditPerspectiveModal.value = true
+}
+
+async function savePerspectiveSid() {
+    if (isProductDerivedPerspective.value) {
+        return
+    }
+    savingPerspectiveSid.value = true
+    try {
+        const trimmedSegments = (editingPerspective.value.sidAuthoritySegments || [])
+            .map((s: string) => (s ?? '').trim())
+            .filter((s: string) => s.length > 0)
+        const response = await graphqlClient.mutate({
+            mutation: gql`
+                mutation updatePerspectiveSidPurl($uuid: ID!, $override: SidPurlOverride, $segments: [String!]) {
+                    updatePerspectiveSidPurl(uuid: $uuid, sidPurlOverride: $override, sidAuthoritySegments: $segments) {
+                        uuid
+                        name
+                        type
+                        sidPurlOverride
+                        sidAuthoritySegments
+                    }
+                }`,
+            variables: {
+                uuid: editingPerspective.value.uuid,
+                // Always send override as a concrete value (INHERIT clears the server-side store).
+                override: editingPerspective.value.sidPurlOverride || 'INHERIT',
+                segments: trimmedSegments
+            },
+            fetchPolicy: 'no-cache'
+        })
+        const updated = (response.data as any)?.updatePerspectiveSidPurl
+        if (updated) {
+            const index = perspectives.value.findIndex(p => p.uuid === editingPerspective.value.uuid)
+            if (index !== -1) {
+                perspectives.value[index] = { ...perspectives.value[index], ...updated }
+            }
+            // Sync local form with server-canonicalized values.
+            editingPerspective.value.sidPurlOverride = updated.sidPurlOverride || 'INHERIT'
+            editingPerspective.value.sidAuthoritySegments = updated.sidAuthoritySegments || []
+            notify('success', 'Saved', 'Perspective sid override updated.')
+        }
+    } catch (error: any) {
+        notify('error', 'Save Failed', commonFunctions.extractGraphQLErrorMessage(error))
+    } finally {
+        savingPerspectiveSid.value = false
+    }
 }
 
 async function updatePerspectiveName() {
@@ -2260,13 +2492,15 @@ async function updatePerspectiveName() {
         })
         
         if (response.data && response.data.updatePerspective) {
-            // Update the perspective in the list
+            // Spread so type / sidPurlOverride / sidAuthoritySegments survive — the rename
+            // mutation only returns name/uuid/org/createdDate, but the local list row
+            // carries fields the table + edit modal both depend on.
             const index = perspectives.value.findIndex(p => p.uuid === editingPerspective.value.uuid)
             if (index !== -1) {
-                perspectives.value[index] = response.data.updatePerspective
+                perspectives.value[index] = { ...perspectives.value[index], ...response.data.updatePerspective }
             }
             notify('success', 'Success', 'Perspective updated successfully')
-            cancelEditPerspective()
+            // Don't auto-close: user may still want to save sid override changes from the same modal.
         }
     } catch (error: any) {
         console.error('Error updating perspective:', error)
@@ -2279,7 +2513,10 @@ async function updatePerspectiveName() {
 function cancelEditPerspective() {
     editingPerspective.value = {
         uuid: '',
-        name: ''
+        name: '',
+        type: 'PERSPECTIVE',
+        sidPurlOverride: 'INHERIT',
+        sidAuthoritySegments: [] as string[]
     }
     showEditPerspectiveModal.value = false
 }
@@ -3163,9 +3400,26 @@ async function loadOrgSettings() {
     orgSettings.justificationMandatory = s?.justificationMandatory || false
     orgSettings.branchSuffixMode = (s?.branchSuffixMode && s.branchSuffixMode !== 'INHERIT') ? s.branchSuffixMode : 'APPEND'
     orgSettings.vexComplianceFramework = s?.vexComplianceFramework || 'NONE'
+    orgSettings.sidPurlMode = (s?.sidPurlMode as SidPurlMode) || 'DISABLED'
+    // Defensive copy so the form's edits don't mutate Vuex state directly.
+    orgSettings.sidAuthoritySegments = Array.isArray(s?.sidAuthoritySegments)
+        ? [...s.sidAuthoritySegments]
+        : []
 }
 
 async function saveOrgSettings() {
+    // Trim first — keeps the input forgiving and the stored shape clean. The server
+    // rejects leading/trailing whitespace anyway, but trimming locally handles
+    // half-typed rows the user forgot to delete.
+    const trimmedSegments = orgSettings.sidAuthoritySegments
+        .map(s => (s ?? '').trim())
+        .filter(s => s.length > 0)
+    // Mirrors the server's ENABLED_STRICT-requires-segments check, using the trimmed list
+    // so " " and "" don't silently pass.
+    if (orgSettings.sidPurlMode === 'ENABLED_STRICT' && trimmedSegments.length === 0) {
+        notify('error', 'sid PURL', 'Enabled — strict mode requires at least one authority segment.')
+        return
+    }
     savingOrgSettings.value = true
     try {
         const resp = await graphqlClient.mutate({
@@ -3186,6 +3440,8 @@ async function saveOrgSettings() {
                             justificationMandatory
                             branchSuffixMode
                             vexComplianceFramework
+                            sidPurlMode
+                            sidAuthoritySegments
                         }
                     }
                 }`,
@@ -3194,21 +3450,27 @@ async function saveOrgSettings() {
                 settings: {
                     justificationMandatory: orgSettings.justificationMandatory,
                     branchSuffixMode: orgSettings.branchSuffixMode,
-                    vexComplianceFramework: orgSettings.vexComplianceFramework
+                    vexComplianceFramework: orgSettings.vexComplianceFramework,
+                    sidPurlMode: orgSettings.sidPurlMode,
+                    // DISABLED implies "no segments"; sending an empty list lets the server
+                    // null them out cleanly per applySidPurlPatch.
+                    sidAuthoritySegments: orgSettings.sidPurlMode === 'DISABLED' ? [] : trimmedSegments
                 }
             },
             fetchPolicy: 'no-cache'
         })
-        
+
         const result = (resp.data as any)?.updateOrganizationSettings
         if (result) {
             store.commit('UPDATE_ORGANIZATION', result)
+            // Sync local form with server-canonicalized values.
+            await loadOrgSettings()
             notify('success', 'Settings Saved', 'Organization settings updated successfully.')
         } else {
             notify('warning', 'Save Warning', 'Save completed but no response received.')
         }
     } catch (err: any) {
-        notify('error', 'Save Failed', err.message || 'Failed to save organization settings.')
+        notify('error', 'Save Failed', commonFunctions.extractGraphQLErrorMessage(err))
     } finally {
         savingOrgSettings.value = false
     }

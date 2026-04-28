@@ -545,6 +545,20 @@
                                     <strong>{{ identifier.idType }}:</strong> {{ identifier.idValue }}
                                 </div>
                             </div>
+                            <div v-if="updatedRelease.preferredBomIdentifier && updatedRelease.preferredBomIdentifier !== releaseUuid">
+                                <strong>Preferred BOM identifier:</strong>
+                                {{ updatedRelease.preferredBomIdentifier }}
+                                <span class="text-muted" style="margin-left: 6px; font-size: 0.85em;">
+                                    (used as the BOM root in VDR / OBOM / aggregated SBOM)
+                                </span>
+                            </div>
+                            <div v-if="updatedRelease.sidComponentName">
+                                <strong>sid component snapshot:</strong>
+                                {{ updatedRelease.sidComponentName }}
+                                <span class="text-muted" style="margin-left: 6px; font-size: 0.85em;">
+                                    (component name at sid emission time — immutable)
+                                </span>
+                            </div>
                             <div><strong>Marketing Version: </strong>{{ updatedRelease && updatedRelease.marketingVersion ? updatedRelease.marketingVersion : 'Not Set' }}</div>
                             <div class=""><strong>Organization:</strong> {{ release.orgDetails.name }}</div>
                             <div class="" v-if="updatedRelease.endpoint">

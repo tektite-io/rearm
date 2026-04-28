@@ -200,6 +200,71 @@
                                             <n-input v-if="!isWritable" type="text" :value="componentBranchSuffixModeLabel" readonly/>
                                             <span class="text-muted" style="display: block; margin-top: 4px;">{{ componentBranchSuffixModeEffective }}</span>
                                         </div>
+                                        <div class="versionSchemaBlock" v-if="updatedComponent && componentData">
+                                            <label style="display: flex; align-items: center; gap: 6px;">
+                                                <span>Component Origin</span>
+                                                <n-tooltip trigger="hover" placement="right">
+                                                    <template #trigger>
+                                                        <n-icon size="16" style="cursor: help;"><QuestionMark /></n-icon>
+                                                    </template>
+                                                    <div style="max-width: 700px; white-space: pre-line;">{{ isInternalTooltip }}</div>
+                                                </n-tooltip>
+                                            </label>
+                                            <div style="display: flex; flex-direction: column; flex: 1; min-width: 0;">
+                                                <n-select
+                                                    v-if="isWritable"
+                                                    :options="isInternalOptions"
+                                                    v-model:value="componentIsInternalModel" />
+                                                <n-input v-if="!isWritable" type="text" :value="isInternalLabels[componentIsInternalModel]" readonly />
+                                                <span v-if="componentIsInternalModel === 'EXTERNAL'" class="text-muted" style="margin-top: 4px; color: #f0a020;">
+                                                    EXTERNAL components don't receive a platform-stamped sid PURL.
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div class="versionSchemaBlock" v-if="updatedComponent && componentData">
+                                            <label style="display: flex; align-items: center; gap: 6px;">
+                                                <span>sid PURL Override</span>
+                                                <n-tooltip trigger="hover" placement="right">
+                                                    <template #trigger>
+                                                        <n-icon size="16" style="cursor: help;"><QuestionMark /></n-icon>
+                                                    </template>
+                                                    <div style="max-width: 700px; white-space: pre-line;">{{ sidPurlOverrideTooltip }}</div>
+                                                </n-tooltip>
+                                            </label>
+                                            <div style="display: flex; flex-direction: column; flex: 1; min-width: 0;">
+                                                <n-select
+                                                    v-if="isWritable"
+                                                    :options="sidPurlOverrideOptions"
+                                                    v-model:value="componentSidPurlOverrideModel"
+                                                    :disabled="sidPurlOverrideDisabled" />
+                                                <n-input v-if="!isWritable" type="text" :value="sidPurlOverrideLabels[componentSidPurlOverrideModel]" readonly />
+                                                <span v-if="sidPurlOverrideDisabled" class="text-muted" style="margin-top: 4px;">
+                                                    {{ sidPurlOverrideDisabledReason }}
+                                                </span>
+                                            </div>
+                                        </div>
+                                        <div class="versionSchemaBlock" v-if="updatedComponent && componentData && componentIsInternalModel === 'INTERNAL'">
+                                            <label style="display: flex; align-items: center; gap: 6px;">
+                                                <span>sid Authority Segments (optional override)</span>
+                                                <n-tooltip trigger="hover" placement="right">
+                                                    <template #trigger>
+                                                        <n-icon size="16" style="cursor: help;"><QuestionMark /></n-icon>
+                                                    </template>
+                                                    <div style="max-width: 700px; white-space: pre-line;">{{ sidAuthoritySegmentsTooltip }}</div>
+                                                </n-tooltip>
+                                            </label>
+                                            <div style="display: flex; flex-direction: column; flex: 1; min-width: 0;">
+                                                <n-dynamic-input
+                                                    v-if="isWritable"
+                                                    v-model:value="updatedComponent.sidAuthoritySegments"
+                                                    :on-create="() => ''"
+                                                    placeholder='e.g. "tenant.example.com"' />
+                                                <n-input v-else type="text" :value="(updatedComponent.sidAuthoritySegments || []).join(' / ')" readonly />
+                                                <span class="text-muted" style="margin-top: 4px;">
+                                                    Optional. Leave empty to inherit. See tooltip for segment ordering.
+                                                </span>
+                                            </div>
+                                        </div>
                                         <div class="versionSchemaBlock" v-if="updatedComponent && componentData && (componentData.type === 'COMPONENT') && myUser.installationType === 'SAAS'">
                                             <label  id="componentKindLabel" for="componentKind">Component Kind</label>
                                             <n-select v-if="isWritable" v-on:update:value="updateComponentKind" :options="[{label: 'Generic', value: 'GENERIC'}, {label: 'Helm', value: 'HELM'}]" v-model:value="updatedComponent.kind" clearable />
@@ -1612,7 +1677,10 @@ const hasCoreSettingsChanges: ComputedRef<boolean> = computed((): boolean => {
         updatedComponent.value.vcs !== componentData.value.vcs ||
         updatedComponent.value.approvalPolicy !== componentData.value.approvalPolicy ||
         authChanged ||
-        commonFunctions.stableStringify(updatedComponent.value.identifiers) !== commonFunctions.stableStringify(componentData.value.identifiers)
+        commonFunctions.stableStringify(updatedComponent.value.identifiers) !== commonFunctions.stableStringify(componentData.value.identifiers) ||
+        (updatedComponent.value.sidPurlOverride || null) !== (componentData.value.sidPurlOverride || null) ||
+        commonFunctions.stableStringify(updatedComponent.value.sidAuthoritySegments || []) !== commonFunctions.stableStringify(componentData.value.sidAuthoritySegments || []) ||
+        ((updatedComponent.value.isInternal || 'INTERNAL') !== (componentData.value.isInternal || 'INTERNAL'))
 })
 
 function resetCoreSettings() {
@@ -1629,6 +1697,9 @@ function resetCoreSettings() {
     updatedComponent.value.vcs = componentData.value.vcs
     updatedComponent.value.approvalPolicy = componentData.value.approvalPolicy
     updatedComponent.value.identifiers = commonFunctions.deepCopy(componentData.value.identifiers)
+    updatedComponent.value.sidPurlOverride = componentData.value.sidPurlOverride
+    updatedComponent.value.sidAuthoritySegments = commonFunctions.deepCopy(componentData.value.sidAuthoritySegments) || []
+    updatedComponent.value.isInternal = componentData.value.isInternal
     
     // Reset marketing version enabled state
     marketingVersionEnabled.value = componentData.value.versionType === 'MARKETING'
@@ -1899,6 +1970,102 @@ const componentBranchSuffixModeModel = computed({
         if (!updatedComponent.value) return
         updatedComponent.value.branchSuffixMode = v === 'INHERIT' ? null : v
     }
+})
+
+// --- sid PURL — component-level override + isInternal classification ---
+
+const isInternalLabels: Record<string, string> = {
+    INTERNAL: 'Internal (our own component)',
+    EXTERNAL: 'External (tracked third-party dependency)'
+}
+
+const isInternalOptions = [
+    { label: isInternalLabels.INTERNAL, value: 'INTERNAL' },
+    { label: isInternalLabels.EXTERNAL, value: 'EXTERNAL' }
+]
+
+const isInternalTooltip = [
+    'INTERNAL: this component is software your organization owns. When sid is enabled, releases',
+    '  of this component get a platform-stamped sid PURL using the org/perspective authority.',
+    'EXTERNAL: this component is a third-party dependency tracked inside your org (e.g. a watched',
+    '  open-source library). The platform never stamps your authority on EXTERNAL components —',
+    '  vendor-supplied identifiers on the component pass through to releases unchanged.',
+    '',
+    'EXTERNAL is a hard ceiling: even with sid enabled in strict mode, EXTERNAL components',
+    'do not receive a platform-stamped sid PURL.'
+].join('\n')
+
+const componentIsInternalModel = computed({
+    get (): string {
+        return updatedComponent.value?.isInternal || 'INTERNAL'
+    },
+    set (v: string) {
+        if (!updatedComponent.value) return
+        updatedComponent.value.isInternal = v
+    }
+})
+
+const sidPurlOverrideLabels: Record<string, string> = {
+    INHERIT: 'Inherit from organization',
+    ENABLE: 'Enable for this component',
+    DISABLE: 'Disable for this component'
+}
+
+const sidPurlOverrideOptions = [
+    { label: sidPurlOverrideLabels.INHERIT, value: 'INHERIT' },
+    { label: sidPurlOverrideLabels.ENABLE, value: 'ENABLE' },
+    { label: sidPurlOverrideLabels.DISABLE, value: 'DISABLE' }
+]
+
+const sidPurlOverrideTooltip = [
+    'Component-level sid override (D3). Only honored when the org is in "Enabled — flexible".',
+    'INHERIT: defer to perspective (if any) or org default.',
+    'ENABLE: emit sid for releases of this component (under FLEXIBLE only).',
+    'DISABLE: skip sid for releases of this component (under FLEXIBLE only).',
+    '',
+    'Disabled when the org is in "Enabled — strict" or "Disabled" mode, or when this',
+    'component is marked EXTERNAL.'
+].join('\n')
+
+const sidAuthoritySegmentsTooltip = [
+    'Component-level authority segments. Decoded values; the platform encodes spaces and',
+    'special characters at emission time. Optional — leave empty to inherit org segments.',
+    '',
+    'First segment is the authority:',
+    '  - Domain form (contains a dot, e.g. "tenant.example.com"): self-asserted.',
+    '  - Registry form (no dot): must be registered in the upstream PURL registry.',
+    '',
+    'Additional segments are publisher / business-unit / product-line context.'
+].join('\n')
+
+const componentSidPurlOverrideModel = computed({
+    get (): string {
+        return updatedComponent.value?.sidPurlOverride || 'INHERIT'
+    },
+    set (v: string) {
+        if (!updatedComponent.value) return
+        updatedComponent.value.sidPurlOverride = v === 'INHERIT' ? null : v
+    }
+})
+
+const orgSidPurlMode = computed((): string => myorg.value?.settings?.sidPurlMode || 'DISABLED')
+
+const sidPurlOverrideDisabled = computed((): boolean => {
+    if (componentIsInternalModel.value === 'EXTERNAL') return true
+    return orgSidPurlMode.value !== 'ENABLED_FLEXIBLE'
+})
+
+const sidPurlOverrideDisabledReason = computed((): string => {
+    if (componentIsInternalModel.value === 'EXTERNAL') {
+        return 'Disabled because this component is EXTERNAL. EXTERNAL components never emit a platform-stamped sid PURL.'
+    }
+    if (orgSidPurlMode.value === 'DISABLED') {
+        return 'Disabled because the organization has sid PURL turned off. Enable it in Admin Settings → Software Identification.'
+    }
+    if (orgSidPurlMode.value === 'ENABLED_STRICT') {
+        return 'Disabled because the organization is in "Enabled — strict" mode (no per-component overrides). Switch to "Enabled — flexible" in Admin Settings to allow component overrides.'
+    }
+    return ''
 })
 
 const componentBranchSuffixModeLabel = computed((): string => {

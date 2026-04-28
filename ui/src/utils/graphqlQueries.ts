@@ -562,6 +562,8 @@ const singleReleaseDataNoParent = `
         idType
         idValue
     }
+    sidComponentName
+    preferredBomIdentifier
     releaseCollection {
         ${RELEASE_COLLECTION_DATA}
     }
@@ -744,7 +746,13 @@ const COMPONENT_FULL_DATA = `
     perspectiveDetails {
         uuid
         name
+        type
+        sidPurlOverride
+        sidAuthoritySegments
     }
+    sidPurlOverride
+    sidAuthoritySegments
+    isInternal
 `
 
 const BRANCH_GQL_DATA = `
