@@ -1129,16 +1129,20 @@ async function loadTabSpecificData (tabName: string) {
             loadUsers(),
             loadPerspectives(),
             store.dispatch('fetchComponents', orgResolved.value),
-            store.dispatch('fetchProducts', orgResolved.value)
+            store.dispatch('fetchProducts', orgResolved.value),
+            ...(myUser.value.installationType === 'SAAS' ? [store.dispatch('fetchInstances', orgResolved.value)] : [])
         ])
         loadInvitedUsers(true)
     } else if (tabName === "userGroups") {
         await loadUsers() // Load users for the user selection dropdown
+        if (myUser.value.installationType === 'SAAS') store.dispatch('fetchInstances', orgResolved.value)
         loadUserGroups()
     } else if (tabName === "programmaticAccess") {
         await loadUsers()
+        if (myUser.value.installationType === 'SAAS') store.dispatch('fetchInstances', orgResolved.value)
         loadProgrammaticAccessKeys(true)
     } else if (tabName === "freeFormKeys") {
+        if (myUser.value.installationType === 'SAAS') store.dispatch('fetchInstances', orgResolved.value)
         loadProgrammaticAccessKeys(true)
     } else if (tabName === "approvalPolicies") {
         fetchApprovalEntries()
