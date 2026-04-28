@@ -68,7 +68,14 @@ public class ApiKey implements Serializable, RelizaEntity, RelizaObject {
 
 	@Column(nullable = true)
 	private UUID createdBy;
-	
+
+	// Denormalised "most recent authenticated use" timestamp; bumped inline
+	// from ApiKeyAccessService whenever a new audit row is written. Lets the
+	// per-org dashboard query read latest-access without scanning the
+	// api_key_access audit table (which grows unboundedly with traffic).
+	@Column(nullable = true)
+	private ZonedDateTime lastAccessDate;
+
 	@Type(JsonBinaryType.class)
 	@Column(columnDefinition = ModelProperties.JSONB)
 	private Map<String,Object> recordData;
@@ -144,6 +151,14 @@ public class ApiKey implements Serializable, RelizaEntity, RelizaObject {
 
 	public void setCreatedBy(UUID createdBy) {
 		this.createdBy = createdBy;
+	}
+
+	public ZonedDateTime getLastAccessDate() {
+		return lastAccessDate;
+	}
+
+	public void setLastAccessDate(ZonedDateTime lastAccessDate) {
+		this.lastAccessDate = lastAccessDate;
 	}
 
 	@Override

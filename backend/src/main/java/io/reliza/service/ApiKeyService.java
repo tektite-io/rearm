@@ -27,7 +27,6 @@ import io.reliza.common.CommonVariables.AuthHeaderParse;
 import io.reliza.common.CommonVariables.TableName;
 import io.reliza.common.Utils;
 import io.reliza.model.ApiKey;
-import io.reliza.model.ApiKeyAccess;
 import io.reliza.model.ApiKey.ApiTypeEnum;
 import io.reliza.model.ApiKeyData;
 import io.reliza.model.ComponentData;
@@ -49,9 +48,6 @@ public class ApiKeyService {
 	@Autowired
 	private GetComponentService getComponentService;;
 
-	@Autowired 
-	private ApiKeyAccessService apiKeyAccessService;
-	
 	private final ApiKeyRepository repository;
 	
     @Autowired
@@ -141,17 +137,16 @@ public class ApiKeyService {
 				.collect(Collectors.toList());
 	}
 	
-	public List<ApiKeyDto>  listApiKeyDtoByOrgWithLastAccessDate(UUID orgUuid) {
-		List<ApiKey> akList = listApiKeyByOrg(orgUuid);
-		List<ApiKeyAccess> akaList = apiKeyAccessService.listKeyAccessByOrg(orgUuid);
-		Map<UUID, ZonedDateTime> apiKeyAccess = akaList.stream().collect(Collectors.toMap(ApiKeyAccess::getApiKeyUuid, ApiKeyAccess::getAccessDate));
-		
-		return akList.stream().map(ak -> {
+	public List<ApiKeyDto> listApiKeyDtoByOrgWithLastAccessDate(UUID orgUuid) {
+		// last_access_date is denormalised onto api_keys (V29) and bumped in
+		// ApiKeyAccessService write paths, so we no longer scan
+		// api_key_access here. That table grows unboundedly with traffic and
+		// the DISTINCT ON join used to dominate this query's runtime.
+		return listApiKeyByOrg(orgUuid).stream().map(ak -> {
 			ApiKeyDto akDto = ApiKeyDto.fromApiKey(ak);
-			akDto.setAccessDate(apiKeyAccess.get(ak.getUuid()));
+			akDto.setAccessDate(ak.getLastAccessDate());
 			return akDto;
 		}).toList();
-		
 	}
 	
 	public String setObjectApiKey (UUID uuid, ApiTypeEnum type, UUID suppliedOrgUuid, String keyOrder, String notes, WhoUpdated wu) {

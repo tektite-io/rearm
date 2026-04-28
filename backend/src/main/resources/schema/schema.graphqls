@@ -389,6 +389,16 @@ type Mutation {
 	# any value passed is ignored.
 	switchInstanceProductFeatureSet(instanceUuid: ID!, productUuid: ID!, featureSetUuid: ID!, namespace: String): Instance
 
+	# Spin up a new feature set on a PRODUCT with selected dependency-
+	# branch overrides applied on top of the BASE feature set's dep
+	# config. The new feature set is named after the override branch
+	# (the first one when multiple are supplied), gets autoIntegrate=
+	# ENABLED, and triggers an auto-integrate run before the call
+	# returns. FREEFORM-only; requires VERSION_FEATURESET on the
+	# product (READ-or-stronger key type passes — the function itself
+	# is the gate).
+	versionFeatureSet(productUuid: ID!, overrides: [VersionFeatureSetOverride!]!): Branch
+
 	# properties
 	createProperty(property: PropertyInput!): Property
 
@@ -2305,6 +2315,7 @@ enum PermissionFunction {
 	LIFECYCLE_UPDATE
 	DEVOPS_READ
 	DEVOPS_WRITE
+	VERSION_FEATURESET
 }
 
 enum SbomProbingStatus {
@@ -3083,6 +3094,19 @@ input CreateVulnAnalysisInput {
 	responses: [AnalysisResponse!]
 	recommendation: String
 	workaround: String
+}
+
+# Single dependency-branch override for the versionFeatureSet
+# mutation. The component to override is identified by either its
+# UUID (componentUuid) OR by (vcsUri, repoPath) — the latter resolves
+# through the same component-by-VCS lookup used elsewhere in the
+# CLI / programmatic flows. branch is the name of the branch on the
+# resolved component to which the dependency should be re-pointed.
+input VersionFeatureSetOverride {
+	componentUuid: ID
+	vcsUri: String
+	repoPath: String
+	branch: String!
 }
 
 input UpdateVulnAnalysisInput {

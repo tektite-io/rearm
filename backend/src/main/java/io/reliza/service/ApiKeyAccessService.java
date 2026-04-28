@@ -16,12 +16,16 @@ import org.springframework.transaction.annotation.Transactional;
 
 import io.reliza.model.ApiKeyAccess;
 import io.reliza.repositories.ApiKeyAccessRepository;
+import io.reliza.repositories.ApiKeyRepository;
 
 @Service
 public class ApiKeyAccessService {
-	
+
 	@Autowired
 	private final ApiKeyAccessRepository repository;
+
+	@Autowired
+	private ApiKeyRepository apiKeyRepository;
 
 	public ApiKeyAccessService(ApiKeyAccessRepository repository) {
 	    this.repository = repository;
@@ -57,6 +61,9 @@ public class ApiKeyAccessService {
 		aka.setAccessDate(ZonedDateTime.now());
 
         saveApiKeyAccess(aka);
+        // Mirror the audit timestamp onto api_keys so the per-org dashboard
+        // read doesn't have to scan api_key_access.
+        apiKeyRepository.touchLastAccessDate(apiKeyUuid);
     }
 
 	@Transactional
@@ -68,7 +75,9 @@ public class ApiKeyAccessService {
 		session.setApiKeyId("SBOM_PROBING");
 		session.setNotes(notesJson);
 		session.setAccessDate(ZonedDateTime.now());
-		return saveApiKeyAccess(session);
+		ApiKeyAccess saved = saveApiKeyAccess(session);
+		apiKeyRepository.touchLastAccessDate(apiKeyUuid);
+		return saved;
 	}
 
 	@Transactional

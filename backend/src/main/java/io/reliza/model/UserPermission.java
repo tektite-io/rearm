@@ -92,7 +92,14 @@ public class UserPermission {
 		// objectUuid and don't carry function-level permissions, so the
 		// devops gate is implicit for them.
 		DEVOPS_READ,
-		DEVOPS_WRITE
+		DEVOPS_WRITE,
+		// Authorises a FREEFORM key (or user) to spin up a new feature
+		// set on a PRODUCT with selected dependency-branch overrides
+		// applied on top of the BASE feature set's dep config. Granted
+		// at PermissionScope.COMPONENT on the product. Permissive call
+		// type — a READ-or-stronger key with this function passes the
+		// auth gate (the operation itself still writes).
+		VERSION_FEATURESET
 		;
 
 		private PermissionFunction () {}
