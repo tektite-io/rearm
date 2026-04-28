@@ -169,10 +169,21 @@ public class OssReleaseDatafetcher {
 			}
 		}
 		
-		List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT, ApiTypeEnum.ORGANIZATION, 
-				ApiTypeEnum.ORGANIZATION_RW);
-		
-		authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgId, CallType.READ, ro);
+		// FREEFORM keys carry their own scope/function permission tuples;
+		// route them through isFreeformKeyAuthorizedForObjectGraphQL so a
+		// COMPONENT-scoped READ permission on this product/component
+		// (the same shape that authorises VERSION_FEATURESET) authorises
+		// the read here too. Other key types continue through the legacy
+		// supportedApiTypes path.
+		if (ahp.getType() == ApiTypeEnum.FREEFORM) {
+			authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+					ahp, PermissionFunction.RESOURCE, PermissionScope.COMPONENT,
+					ro.getUuid(), List.of(ro), CallType.READ);
+		} else {
+			List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT, ApiTypeEnum.ORGANIZATION,
+					ApiTypeEnum.ORGANIZATION_RW);
+			authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgId, CallType.READ, ro);
+		}
 		
 		Optional<ReleaseData> optRd = Optional.empty();
 		

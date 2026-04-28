@@ -168,8 +168,10 @@ type Query {
 	# namespace. FREEFORM-only; requires DEVOPS_READ on the instance (or
 	# its parent cluster). namespace is required for STANDALONE_INSTANCE
 	# and CLUSTER instances; for CLUSTER_INSTANCE it is pinned to the
-	# instance's own namespace and any value passed is ignored.
-	listInstanceProductFeatureSets(instanceUuid: ID!, namespace: String): [InstanceProductFeatureSets!]!
+	# instance's own namespace and any value passed is ignored. Pass
+	# either instanceUuid or instanceUri (looked up against the FREEFORM
+	# key's org) to identify the instance.
+	listInstanceProductFeatureSets(instanceUuid: ID, instanceUri: String, namespace: String): [InstanceProductFeatureSets!]!
 
 	# properties
 	property(propertyUuid: ID!): Property
@@ -401,8 +403,10 @@ type Mutation {
 	# STANDALONE_INSTANCE and CLUSTER instances (the (product, namespace)
 	# pair uniquely identifies a deployment on the plan); for
 	# CLUSTER_INSTANCE it is pinned to the instance's own namespace and
-	# any value passed is ignored.
-	switchInstanceProductFeatureSet(instanceUuid: ID!, productUuid: ID!, featureSetUuid: ID!, namespace: String): Instance
+	# any value passed is ignored. Pass either instanceUuid or
+	# instanceUri (looked up against the FREEFORM key's org) to identify
+	# the instance.
+	switchInstanceProductFeatureSet(instanceUuid: ID, instanceUri: String, productUuid: ID!, featureSetUuid: ID!, namespace: String): Instance
 
 	# Spin up a new feature set on a PRODUCT with selected dependency-
 	# branch overrides applied on top of the BASE feature set's dep
@@ -2842,6 +2846,12 @@ type Instance {
 	uri: String
 	org: ID
 	name: String
+	# Human-readable identifier resolved server-side. CLUSTER instances are
+	# identified by `name`; STANDALONE_INSTANCE / CLUSTER_INSTANCE are
+	# identified by `uri`. Falls back to the other field, then to the
+	# stringified UUID, so this is always non-empty for any persisted
+	# instance.
+	displayName: String
 	namespace: String
 	instanceType: InstanceType
 	status: Status

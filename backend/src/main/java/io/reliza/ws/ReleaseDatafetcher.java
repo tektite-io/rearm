@@ -649,16 +649,23 @@ public class ReleaseDatafetcher {
 			@InputArgument("hash") String hash, @InputArgument("componentId") String componentIdStr) throws RelizaException {
 		DgsWebMvcRequestData requestData =  (DgsWebMvcRequestData) DgsContext.getRequestData(dfe);
 		var servletWebRequest = (ServletWebRequest) requestData.getWebRequest();
-		var ahp = authorizationService.authenticateProgrammatic(requestData.getHeaders(), servletWebRequest);
+		ProgrammaticAuthContext authCtx = authorizationService.authenticateProgrammaticWithOrg(requestData.getHeaders(), servletWebRequest);
+		var ahp = authCtx.ahp();
 		if (null == ahp ) throw new AccessDeniedException("Invalid authorization type");
-		
-		List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT,
-				ApiTypeEnum.ORGANIZATION, ApiTypeEnum.ORGANIZATION_RW);
 
 		UUID componentId = null;
 		UUID orgId = null;
 		if (ApiTypeEnum.COMPONENT == ahp.getType()) {
 			componentId = ahp.getObjUuid();
+		} else if (ApiTypeEnum.FREEFORM == ahp.getType()) {
+			// FREEFORM keys carry their org indirectly (resolved by
+			// authenticateProgrammaticWithOrg) and require an explicit
+			// componentId in the input.
+			orgId = authCtx.orgUuid();
+			if (StringUtils.isEmpty(componentIdStr)) {
+				throw new RelizaException("Must provide component UUID as input when using a FREEFORM API key");
+			}
+			componentId = UUID.fromString(componentIdStr);
 		} else {
 			try {
 				orgId = ahp.getObjUuid();
@@ -668,12 +675,25 @@ public class ReleaseDatafetcher {
 			}
 		}
 		Optional<ComponentData> ocd = getComponentService.getComponentData(componentId);
-		
+
 		RelizaObject ro = ocd.isPresent() ? ocd.get(): null;
-		
-		if (ApiTypeEnum.COMPONENT == ahp.getType() && ocd.isPresent()) orgId = ocd.get().getOrg(); 
-		authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgId, CallType.READ, ro);
-		
+
+		if (ApiTypeEnum.COMPONENT == ahp.getType() && ocd.isPresent()) orgId = ocd.get().getOrg();
+		// FREEFORM keys gate via the per-permission scope/function path so
+		// a COMPONENT-scope READ permission on this product/component
+		// authorises the read; other key types stay on the legacy
+		// supportedApiTypes path.
+		if (ApiTypeEnum.FREEFORM == ahp.getType()) {
+			if (ro == null) throw new RelizaException("Component " + componentId + " not found");
+			authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+					ahp, PermissionFunction.RESOURCE, PermissionScope.COMPONENT,
+					ro.getUuid(), List.of(ro), CallType.READ);
+		} else {
+			List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT,
+					ApiTypeEnum.ORGANIZATION, ApiTypeEnum.ORGANIZATION_RW);
+			authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgId, CallType.READ, ro);
+		}
+
 		Optional<Deliverable> od = getDeliverableService.getDeliverableByDigestAndComponent(hash, componentId);
 		// locate lowest level release referencing this artifact
 		// we pass component from artifact since we already scoped artifact search to only this component in getArtifactByDigestAndComponent
@@ -688,17 +708,21 @@ public class ReleaseDatafetcher {
 			@InputArgument("version") String version, @InputArgument("componentId") UUID componentIdProvided) throws RelizaException {
 		DgsWebMvcRequestData requestData =  (DgsWebMvcRequestData) DgsContext.getRequestData(dfe);
 		var servletWebRequest = (ServletWebRequest) requestData.getWebRequest();
-		var ahp = authorizationService.authenticateProgrammatic(requestData.getHeaders(), servletWebRequest);
+		ProgrammaticAuthContext authCtx = authorizationService.authenticateProgrammaticWithOrg(requestData.getHeaders(), servletWebRequest);
+		var ahp = authCtx.ahp();
 		if (null == ahp ) throw new AccessDeniedException("Invalid authorization type");
-		
-		List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT,
-				ApiTypeEnum.ORGANIZATION, ApiTypeEnum.ORGANIZATION_RW);
 
 		UUID orgId = null;
 		UUID componentId = null;
 		if (ApiTypeEnum.COMPONENT == ahp.getType()) {
 			componentId = ahp.getObjUuid();
 			if (null != componentIdProvided && !componentId.equals(componentIdProvided)) throw new AccessDeniedException("Component ID mismatch");
+		} else if (ApiTypeEnum.FREEFORM == ahp.getType()) {
+			orgId = authCtx.orgUuid();
+			if (null == componentIdProvided) {
+				throw new RelizaException("Must provide component UUID as input when using a FREEFORM API key");
+			}
+			componentId = componentIdProvided;
 		} else {
 			try {
 				orgId = ahp.getObjUuid();
@@ -707,21 +731,33 @@ public class ReleaseDatafetcher {
 				throw new RelizaException("Must provide component UUID as input if using organization wide API access");
 			}
 		}
-		
+
 		if (ApiTypeEnum.ORGANIZATION == ahp.getType() || ApiTypeEnum.ORGANIZATION_RW == ahp.getType()) {
 			orgId = ahp.getObjUuid();
 		}
-		
+
 		Optional<ComponentData> ocd = getComponentService.getComponentData(componentId);
 		if (ocd.isEmpty()) {
 			throw new RelizaException("Component " + componentId + " not found");
 		}
-		
+
 		RelizaObject ro = ocd.get();
 		if (null == orgId) orgId = ocd.get().getOrg();
-		
-		authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgId, CallType.READ, ro);
-		
+
+		// FREEFORM keys gate via the per-permission scope/function path so
+		// a COMPONENT-scope READ permission on this product/component
+		// authorises the read; other key types stay on the legacy
+		// supportedApiTypes path.
+		if (ApiTypeEnum.FREEFORM == ahp.getType()) {
+			authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+					ahp, PermissionFunction.RESOURCE, PermissionScope.COMPONENT,
+					ro.getUuid(), List.of(ro), CallType.READ);
+		} else {
+			List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT,
+					ApiTypeEnum.ORGANIZATION, ApiTypeEnum.ORGANIZATION_RW);
+			authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgId, CallType.READ, ro);
+		}
+
 		Optional<ReleaseData> ord = releaseService.getReleaseDataByComponentAndVersion(componentId, version);
 		if (ord.isEmpty()) return "{}";
 		return releaseService.exportReleaseAsObom(ord.get().getUuid()).toString();
