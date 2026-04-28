@@ -6,21 +6,20 @@ package io.reliza.service.oss;
 
 import java.util.List;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
-import java.util.stream.Collectors;
-import java.util.stream.StreamSupport;
 
 import org.springframework.stereotype.Service;
 
 import io.reliza.common.CommonVariables.PerspectiveType;
+import io.reliza.exceptions.RelizaException;
+import io.reliza.model.ComponentData;
 import io.reliza.model.RelizaObject;
 import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Service
 public class OssPerspectiveService {
-	
+
 	public static class PerspectiveData implements RelizaObject {
 		public PerspectiveType getType() {
 			return null;
@@ -44,6 +43,18 @@ public class OssPerspectiveService {
 			return null;
 		}
 	}
+
+	/**
+	 * Aggregated perspective-layer contribution to the sid PURL policy for a component.
+	 * {@code enabled} is null when no real perspective produced an enable/disable decision;
+	 * {@code segments} is null when no real perspective contributed authority segments.
+	 */
+	public record PerspectiveSidResolution(Boolean enabled, List<String> segments) {
+		public static PerspectiveSidResolution none() {
+			return new PerspectiveSidResolution(null, null);
+		}
+	}
+
 	/**
 	 * Part of ReARM Pro only
 	 * @param uuid
@@ -54,16 +65,12 @@ public class OssPerspectiveService {
 	}
 
 	/**
-	 * Fetch real perspectives by UUID in a single repo call. No fallback to product-derived
-	 * synthetics — UUIDs not in the perspective table are silently dropped. Use this on
-	 * hot paths that walk {@code ComponentData.perspectives}.
+	 * Walks the component's real perspectives and returns their aggregated sid override
+	 * contribution (enabled + segments). Throws on perspective-level conflicts.
+	 * Part of ReARM Pro only — CE has no real perspectives, so this returns
+	 * {@link PerspectiveSidResolution#none()}.
 	 */
-	public List<PerspectiveData> findRealPerspectivesByUuids(Set<UUID> uuids) {
-		if (uuids == null || uuids.isEmpty()) {
-			return List.of();
-		}
-		return StreamSupport.stream(repository.findAllById(uuids).spliterator(), false)
-				.map(PerspectiveData::dataFromRecord)
-				.collect(Collectors.toUnmodifiableList());
+	public PerspectiveSidResolution resolvePerspectiveSidOverrides(ComponentData cd) throws RelizaException {
+		return PerspectiveSidResolution.none();
 	}
 }

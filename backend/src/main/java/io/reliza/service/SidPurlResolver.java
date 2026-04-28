@@ -5,21 +5,18 @@
 package io.reliza.service;
 
 import java.util.List;
-import java.util.Set;
-import java.util.UUID;
 
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
-import io.reliza.common.CommonVariables.PerspectiveType;
 import io.reliza.common.CommonVariables.SidPurlMode;
 import io.reliza.common.CommonVariables.SidPurlOverride;
 import io.reliza.exceptions.RelizaException;
 import io.reliza.model.ComponentData;
 import io.reliza.model.DeliverableData.BelongsToOrganization;
 import io.reliza.model.OrganizationData;
-import io.reliza.model.saas.PerspectiveData;
 import io.reliza.service.oss.OssPerspectiveService;
+import io.reliza.service.oss.OssPerspectiveService.PerspectiveSidResolution;
 
 /**
  * Resolves the effective sid (Software IDentification) PURL policy for a component
@@ -67,14 +64,18 @@ public class SidPurlResolver {
 		}
 		// ENABLED_FLEXIBLE — layered resolution below.
 
-		// Synthetic product-derived perspectives are skipped — only real perspectives carry overrides.
-		List<PerspectiveData> realPerspectives = collectRealPerspectives(cd);
+		// Perspective walk + conflict detection lives in OssPerspectiveService — keeps SaaS-only
+		// PerspectiveData out of this file. CE returns a vacuous resolution.
+		PerspectiveSidResolution perspectiveOverrides = ossPerspectiveService.resolvePerspectiveSidOverrides(cd);
 
-		Boolean enabled = decideEnabled(cd, realPerspectives);
+		SidPurlOverride componentOverride = cd.getSidPurlOverride();
+		Boolean enabled;
 		SidPurlSource source;
-		if (cd.getSidPurlOverride() != null && cd.getSidPurlOverride() != SidPurlOverride.INHERIT) {
+		if (componentOverride != null && componentOverride != SidPurlOverride.INHERIT) {
+			enabled = componentOverride == SidPurlOverride.ENABLE;
 			source = SidPurlSource.COMPONENT_OVERRIDE;
-		} else if (enabled != null) {
+		} else if (perspectiveOverrides.enabled() != null) {
+			enabled = perspectiveOverrides.enabled();
 			source = SidPurlSource.PERSPECTIVE_OVERRIDE;
 		} else {
 			return new ResolvedSidPolicy(false, null, SidPurlSource.ORG_FLEXIBLE_DEFAULT);
@@ -84,104 +85,20 @@ public class SidPurlResolver {
 			return new ResolvedSidPolicy(false, null, source);
 		}
 
-		List<String> resolvedSegments = decideSegments(cd, realPerspectives, orgSegments);
+		List<String> resolvedSegments = decideSegments(cd, perspectiveOverrides.segments(), orgSegments);
 		return new ResolvedSidPolicy(true, resolvedSegments, source);
 	}
 
-	/**
-	 * Returns Boolean.TRUE/FALSE when any level produces a concrete decision; null when
-	 * every level is INHERIT (caller falls through to ORG_FLEXIBLE_DEFAULT).
-	 *
-	 * @throws RelizaException if real perspectives carry conflicting non-INHERIT overrides
-	 */
-	private Boolean decideEnabled(ComponentData cd, List<PerspectiveData> realPerspectives) throws RelizaException {
-		SidPurlOverride compOverride = cd.getSidPurlOverride();
-		if (compOverride != null && compOverride != SidPurlOverride.INHERIT) {
-			return compOverride == SidPurlOverride.ENABLE;
-		}
-
-		// Component is INHERIT — consult real perspectives.
-		Boolean perspectiveDecision = null;
-		UUID decisionSource = null;
-		for (PerspectiveData pd : realPerspectives) {
-			SidPurlOverride pOverride = pd.getSidPurlOverride();
-			if (pOverride == null || pOverride == SidPurlOverride.INHERIT) {
-				continue;
-			}
-			boolean thisDecision = pOverride == SidPurlOverride.ENABLE;
-			if (perspectiveDecision == null) {
-				perspectiveDecision = thisDecision;
-				decisionSource = pd.getUuid();
-			} else if (!perspectiveDecision.equals(thisDecision)) {
-				throw new RelizaException("Component " + cd.getUuid() + " belongs to multiple real perspectives "
-						+ "with conflicting sidPurlOverride values: perspective " + decisionSource
-						+ " says " + (perspectiveDecision ? "ENABLE" : "DISABLE")
-						+ ", perspective " + pd.getUuid() + " says " + pOverride
-						+ ". Resolve the conflict at the perspective level.");
-			}
-		}
-		return perspectiveDecision;
-	}
-
-	/**
-	 * Independent walk for authority segments — most-specific non-empty list wins.
-	 *
-	 * @throws RelizaException if real perspectives carry conflicting non-empty segments
-	 */
-	private List<String> decideSegments(ComponentData cd, List<PerspectiveData> realPerspectives,
-			List<String> orgFallback) throws RelizaException {
+	/** Most-specific non-empty list wins: component → perspective → org. */
+	private static List<String> decideSegments(ComponentData cd, List<String> perspectiveSegments,
+			List<String> orgFallback) {
 		List<String> compSegments = cd.getSidAuthoritySegments();
 		if (compSegments != null && !compSegments.isEmpty()) {
 			return compSegments;
 		}
-
-		List<String> perspectiveSegments = null;
-		UUID segmentsSource = null;
-		for (PerspectiveData pd : realPerspectives) {
-			List<String> pSegments = pd.getSidAuthoritySegments();
-			if (pSegments == null || pSegments.isEmpty()) {
-				continue;
-			}
-			if (perspectiveSegments == null) {
-				perspectiveSegments = pSegments;
-				segmentsSource = pd.getUuid();
-			} else if (!perspectiveSegments.equals(pSegments)) {
-				// List equality is order-sensitive on purpose: segments are an ordered
-				// tuple (authority + publisher/BU/product-line context) and reordering
-				// produces a different sid PURL canonicalization.
-				throw new RelizaException("Component " + cd.getUuid() + " belongs to multiple real perspectives "
-						+ "with conflicting sidAuthoritySegments: perspective " + segmentsSource
-						+ " says " + perspectiveSegments + ", perspective " + pd.getUuid()
-						+ " says " + pSegments
-						+ ". Resolve the conflict at the perspective level.");
-			}
-		}
-		if (perspectiveSegments != null) {
+		if (perspectiveSegments != null && !perspectiveSegments.isEmpty()) {
 			return perspectiveSegments;
 		}
-
 		return orgFallback;
-	}
-
-	/**
-	 * Real perspectives only (product-derived synthetics filtered out — they don't carry
-	 * override fields). Single repo call regardless of perspective count. CE has no real
-	 * perspectives so this returns empty there naturally.
-	 */
-	private List<PerspectiveData> collectRealPerspectives(ComponentData cd) {
-		Set<UUID> perspectiveUuids = cd.getPerspectives();
-		if (perspectiveUuids == null || perspectiveUuids.isEmpty()) {
-			return List.of();
-		}
-		// findRealPerspectivesByUuids hits the perspective table directly and skips
-		// the per-UUID product-derived fallback — exactly what we want, since only
-		// real perspectives can carry sid override fields.
-		List<PerspectiveData> realPerspectives = ossPerspectiveService.findRealPerspectivesByUuids(perspectiveUuids);
-		// Defensive PerspectiveType filter in case the repository ever stores
-		// product-derived rows directly (it doesn't today, but the type filter keeps
-		// the contract local to this method).
-		return realPerspectives.stream()
-				.filter(pd -> pd.getType() == PerspectiveType.PERSPECTIVE)
-				.toList();
 	}
 }

@@ -9,41 +9,52 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.anySet;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.when;
 
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
 
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import io.reliza.common.CommonVariables.PerspectiveType;
 import io.reliza.common.CommonVariables.SidPurlMode;
 import io.reliza.common.CommonVariables.SidPurlOverride;
 import io.reliza.exceptions.RelizaException;
 import io.reliza.model.ComponentData;
 import io.reliza.model.DeliverableData.BelongsToOrganization;
 import io.reliza.model.OrganizationData;
-import io.reliza.model.saas.PerspectiveData;
 import io.reliza.service.SidPurlResolver.ResolvedSidPolicy;
 import io.reliza.service.SidPurlResolver.SidPurlSource;
 import io.reliza.service.oss.OssPerspectiveService;
+import io.reliza.service.oss.OssPerspectiveService.PerspectiveSidResolution;
 
 /**
  * Branch coverage for {@link SidPurlResolver}: EXTERNAL ceiling, org-mode short-circuit,
  * FLEXIBLE layered resolution (component / perspective / default), independent segments
  * walk, perspective ambiguity throws, orphan segments don't auto-enable.
+ *
+ * The perspective walk itself (and its conflict detection) lives in
+ * {@link OssPerspectiveService#resolvePerspectiveSidOverrides} and is unit-tested there
+ * in SaaS — here we mock the aggregate result.
  */
 @ExtendWith(MockitoExtension.class)
 public class SidPurlResolverTest {
 
 	@Mock private OssPerspectiveService ossPerspectiveService;
 	@InjectMocks private SidPurlResolver resolver;
+
+	@BeforeEach
+	void defaultNoPerspectiveContribution() throws RelizaException {
+		lenient().when(ossPerspectiveService.resolvePerspectiveSidOverrides(any()))
+				.thenReturn(PerspectiveSidResolution.none());
+	}
 
 	// ---- EXTERNAL hard ceiling ----
 
@@ -56,7 +67,7 @@ public class SidPurlResolverTest {
 		ResolvedSidPolicy policy = resolver.resolveForComponent(cd, org);
 
 		assertFalse(policy.enabled(), "EXTERNAL is a hard ceiling — STRICT must not enable it");
-		assertEquals(SidPurlPolicySource(policy), SidPurlSource.EXTERNAL_COMPONENT);
+		assertEquals(SidPurlSource.EXTERNAL_COMPONENT, policy.source());
 		assertNull(policy.authoritySegments());
 	}
 
@@ -163,11 +174,10 @@ public class SidPurlResolverTest {
 
 	@Test
 	void flexiblePerspectiveEnable_winsWhenComponentInherits() throws RelizaException {
-		UUID pUuid = UUID.randomUUID();
-		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null, Set.of(pUuid));
+		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null, Set.of(UUID.randomUUID()));
 		OrganizationData org = orgWith(SidPurlMode.ENABLED_FLEXIBLE, List.of("reliza.io"));
-		when(ossPerspectiveService.findRealPerspectivesByUuids(anySet()))
-				.thenReturn(List.of(perspective(pUuid, SidPurlOverride.ENABLE, null)));
+		when(ossPerspectiveService.resolvePerspectiveSidOverrides(any()))
+				.thenReturn(new PerspectiveSidResolution(true, null));
 
 		ResolvedSidPolicy policy = resolver.resolveForComponent(cd, org);
 
@@ -179,12 +189,11 @@ public class SidPurlResolverTest {
 
 	@Test
 	void flexiblePerspectiveSegments_overrideOrgFallback() throws RelizaException {
-		UUID pUuid = UUID.randomUUID();
-		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null, Set.of(pUuid));
+		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null, Set.of(UUID.randomUUID()));
 		OrganizationData org = orgWith(SidPurlMode.ENABLED_FLEXIBLE, List.of("reliza.io"));
-		when(ossPerspectiveService.findRealPerspectivesByUuids(anySet()))
-				.thenReturn(List.of(perspective(pUuid, SidPurlOverride.ENABLE,
-						List.of("tenant.example.com", "Acme Robotics"))));
+		when(ossPerspectiveService.resolvePerspectiveSidOverrides(any()))
+				.thenReturn(new PerspectiveSidResolution(true,
+						List.of("tenant.example.com", "Acme Robotics")));
 
 		ResolvedSidPolicy policy = resolver.resolveForComponent(cd, org);
 
@@ -198,65 +207,28 @@ public class SidPurlResolverTest {
 	void componentSegments_winOverPerspectiveAndOrg() throws RelizaException {
 		// Component override=ENABLE + own segments — those take precedence over both
 		// perspective segments and org fallback.
-		UUID pUuid = UUID.randomUUID();
 		ComponentData cd = component(BelongsToOrganization.INTERNAL, SidPurlOverride.ENABLE,
-				List.of("comp.example.com"), Set.of(pUuid));
+				List.of("comp.example.com"), Set.of(UUID.randomUUID()));
 		OrganizationData org = orgWith(SidPurlMode.ENABLED_FLEXIBLE, List.of("reliza.io"));
-		when(ossPerspectiveService.findRealPerspectivesByUuids(anySet()))
-				.thenReturn(List.of(perspective(pUuid, SidPurlOverride.ENABLE,
-						List.of("persp.example"))));
+		when(ossPerspectiveService.resolvePerspectiveSidOverrides(any()))
+				.thenReturn(new PerspectiveSidResolution(true, List.of("persp.example")));
 
 		ResolvedSidPolicy policy = resolver.resolveForComponent(cd, org);
 
 		assertEquals(List.of("comp.example.com"), policy.authoritySegments());
 	}
 
-	// ---- Perspective ambiguity ----
+	// ---- Perspective ambiguity: service throws, resolver propagates ----
 
 	@Test
-	void perspectiveOverrideMismatch_throws() {
-		UUID p1 = UUID.randomUUID();
-		UUID p2 = UUID.randomUUID();
-		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null, Set.of(p1, p2));
+	void perspectiveServiceConflict_propagates() throws RelizaException {
+		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null,
+				Set.of(UUID.randomUUID(), UUID.randomUUID()));
 		OrganizationData org = orgWith(SidPurlMode.ENABLED_FLEXIBLE, List.of("reliza.io"));
-		when(ossPerspectiveService.findRealPerspectivesByUuids(anySet()))
-				.thenReturn(List.of(
-						perspective(p1, SidPurlOverride.ENABLE, null),
-						perspective(p2, SidPurlOverride.DISABLE, null)));
+		when(ossPerspectiveService.resolvePerspectiveSidOverrides(any()))
+				.thenThrow(new RelizaException("conflicting perspective overrides"));
 
 		assertThrows(RelizaException.class, () -> resolver.resolveForComponent(cd, org));
-	}
-
-	@Test
-	void perspectiveSegmentsMismatchWhenBothEnable_throws() {
-		UUID p1 = UUID.randomUUID();
-		UUID p2 = UUID.randomUUID();
-		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null, Set.of(p1, p2));
-		OrganizationData org = orgWith(SidPurlMode.ENABLED_FLEXIBLE, List.of("reliza.io"));
-		when(ossPerspectiveService.findRealPerspectivesByUuids(anySet()))
-				.thenReturn(List.of(
-						perspective(p1, SidPurlOverride.ENABLE, List.of("a.example.com")),
-						perspective(p2, SidPurlOverride.ENABLE, List.of("b.example.com"))));
-
-		assertThrows(RelizaException.class, () -> resolver.resolveForComponent(cd, org));
-	}
-
-	@Test
-	void perspectiveSegmentsAgree_acceptedEvenAcrossMultiplePerspectives() throws RelizaException {
-		// Both perspectives ENABLE with the same segments — equality check passes.
-		UUID p1 = UUID.randomUUID();
-		UUID p2 = UUID.randomUUID();
-		ComponentData cd = component(BelongsToOrganization.INTERNAL, null, null, Set.of(p1, p2));
-		OrganizationData org = orgWith(SidPurlMode.ENABLED_FLEXIBLE, List.of("reliza.io"));
-		when(ossPerspectiveService.findRealPerspectivesByUuids(anySet()))
-				.thenReturn(List.of(
-						perspective(p1, SidPurlOverride.ENABLE, List.of("shared.example.com")),
-						perspective(p2, SidPurlOverride.ENABLE, List.of("shared.example.com"))));
-
-		ResolvedSidPolicy policy = resolver.resolveForComponent(cd, org);
-
-		assertTrue(policy.enabled());
-		assertEquals(List.of("shared.example.com"), policy.authoritySegments());
 	}
 
 	// ---- Orphan segments at component level ----
@@ -289,16 +261,6 @@ public class SidPurlResolverTest {
 		return cd;
 	}
 
-	private static PerspectiveData perspective(UUID uuid, SidPurlOverride override, List<String> segments) {
-		PerspectiveData pd = new PerspectiveData();
-		pd.setUuid(uuid);
-		pd.setName("p-" + uuid.toString().substring(0, 8));
-		pd.setType(PerspectiveType.PERSPECTIVE);
-		pd.setSidPurlOverride(override);
-		pd.setSidAuthoritySegments(segments);
-		return pd;
-	}
-
 	private static OrganizationData orgWith(SidPurlMode mode, List<String> segments) {
 		OrganizationData od = new OrganizationData();
 		od.setUuid(UUID.randomUUID());
@@ -307,10 +269,5 @@ public class SidPurlResolverTest {
 		s.setSidAuthoritySegments(segments);
 		od.setSettings(s);
 		return od;
-	}
-
-	/** Workaround for the resolver returning a record whose {@code source()} is the SidPurlSource enum. */
-	private static SidPurlSource SidPurlPolicySource(ResolvedSidPolicy policy) {
-		return policy.source();
 	}
 }

@@ -70,7 +70,7 @@ public class VersionAssignmentTest
 	 * regardless of execution order.
 	 */
 	@BeforeEach
-	public void resetOrgBranchSuffixMode() {
+	public void resetOrgBranchSuffixMode() throws RelizaException {
 		Organization org = testInitializer.obtainOrganization();
 		OrganizationData.Settings patch = new OrganizationData.Settings();
 		patch.setBranchSuffixMode(BranchSuffixMode.APPEND);
