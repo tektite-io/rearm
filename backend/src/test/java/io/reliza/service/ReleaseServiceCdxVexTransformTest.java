@@ -7,11 +7,18 @@ package io.reliza.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.nio.charset.StandardCharsets;
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 import org.cyclonedx.Version;
@@ -27,7 +34,11 @@ import org.cyclonedx.parsers.JsonParser;
 import org.junit.jupiter.api.Test;
 
 import io.reliza.common.Utils;
+import io.reliza.dto.HistoricallyResolvedFinding;
 import io.reliza.model.VdrMetadataProperty;
+import io.reliza.model.VulnAnalysisData.AnalysisHistory;
+import io.reliza.model.dto.ReleaseMetricsDto.VulnerabilityDto;
+import io.reliza.model.dto.ReleaseMetricsDto.VulnerabilitySeverity;
 
 /**
  * Structural tests for {@code ReleaseService.transformVdrBomToCdxVex}.
@@ -51,6 +62,7 @@ public class ReleaseServiceCdxVexTransformTest {
 		root.setType(Type.APPLICATION);
 		root.setName("demo-app");
 		root.setVersion("1.0.0");
+		root.setBomRef("pkg:generic/demo-org/demo-app@1.0.0");
 		Utils.augmentRootBomComponent("demo-org", root);
 		Utils.setRearmBomMetadata(bom, root);
 
@@ -210,5 +222,203 @@ public class ReleaseServiceCdxVexTransformTest {
 		assertNotNull(transformed.getComponents());
 		assertEquals(1, transformed.getComponents().size());
 		assertNotNull(findProperty(transformed, VdrMetadataProperty.VEX_DOCUMENT));
+	}
+
+	// ---- Historical-resolved (Task 9) ----
+
+	private static HistoricallyResolvedFinding hrf(String vulnId, String purl,
+			UUID resolvingReleaseUuid, String resolvingVersion, String resolvingIso8601) {
+		VulnerabilityDto vd =
+				new VulnerabilityDto(
+					purl, vulnId,
+					VulnerabilitySeverity.HIGH,
+					Set.of(), Set.of(), Set.of(),
+					null, null, null, null, null, null, null, null);
+		return new HistoricallyResolvedFinding(
+				vd, resolvingReleaseUuid, resolvingVersion,
+				ZonedDateTime.parse(resolvingIso8601));
+	}
+
+	@Test
+	void appendHistoricallyResolved_emptyList_doesNotChangeBom() throws Exception {
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+		int before = bom.getVulnerabilities().size();
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, List.of(), Map.of(), null);
+
+		assertEquals(before, bom.getVulnerabilities().size(),
+				"Empty historical-resolved list must not modify the bom");
+	}
+
+	@Test
+	void appendHistoricallyResolved_addsEntriesWithCorrectShape() throws Exception {
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+		UUID resolvingUuid = UUID.fromString("00000000-0000-0000-0000-0000000000fa");
+
+		List<HistoricallyResolvedFinding> findings = List.of(
+				hrf("CVE-2024-9001", "pkg:npm/lodash@4.17.20", resolvingUuid, "1.5", "2026-02-01T00:00:00Z"));
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, findings, Map.of(), null);
+
+		Vulnerability appended = bom.getVulnerabilities().stream()
+				.filter(v -> "CVE-2024-9001".equals(v.getId()))
+				.findFirst().orElse(null);
+		assertNotNull(appended, "Historical-resolved CVE must be appended to bom.vulnerabilities[]");
+		assertNotNull(appended.getAnalysis());
+		assertEquals(Vulnerability.Analysis.State.RESOLVED, appended.getAnalysis().getState());
+
+		// affects[].ref must point at the product (metadata.component.bom-ref), not at the historical
+		// transitive component which is not in current components[].
+		String productBomRef = bom.getMetadata().getComponent().getBomRef();
+		assertNotNull(productBomRef);
+		assertTrue(appended.getAffects() != null && !appended.getAffects().isEmpty());
+		assertEquals(productBomRef, appended.getAffects().get(0).getRef());
+
+		// Provenance properties.
+		Map<String, String> propMap = new HashMap<>();
+		if (appended.getProperties() != null) {
+			for (Property p : appended.getProperties()) propMap.put(p.getName(), p.getValue());
+		}
+		assertEquals(resolvingUuid.toString(), propMap.get("rearm:vex:resolvedInRelease"));
+		assertEquals("1.5", propMap.get("rearm:vex:resolvedInVersion"));
+	}
+
+	@Test
+	void appendHistoricallyResolved_skipsCveAlreadyInBom() throws Exception {
+		// The fixture's CVE-2024-0001 is in the bom (state=EXPLOITABLE). Even if we pass it as
+		// historically resolved (which would be a contract violation upstream), the static helper
+		// is defensively idempotent against duplicates.
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+		int before = bom.getVulnerabilities().size();
+
+		List<HistoricallyResolvedFinding> findings = List.of(
+				hrf("CVE-2024-0001", "pkg:npm/left-pad@1.0.0",
+					UUID.fromString("00000000-0000-0000-0000-0000000000fb"), "1.5",
+					"2026-02-01T00:00:00Z"));
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, findings, Map.of(), null);
+
+		assertEquals(before, bom.getVulnerabilities().size(),
+				"Historical entry for a CVE id already in bom must be skipped");
+	}
+
+	@Test
+	void appendHistoricallyResolved_withMatchingAnalysis_enrichesDetailAndLastUpdated() throws Exception {
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+
+		UUID resolvingUuid = UUID.fromString("00000000-0000-0000-0000-0000000000fc");
+		ZonedDateTime resolveDate = ZonedDateTime.parse("2026-02-01T00:00:00Z");
+		ZonedDateTime analysisDate = ZonedDateTime.parse("2026-02-15T12:34:56Z");
+
+		List<HistoricallyResolvedFinding> findings = List.of(
+				hrf("CVE-2024-9100", "pkg:npm/lodash@4.17.20", resolvingUuid, "1.5",
+					resolveDate.toString()));
+
+		// Pre-resolved AnalysisHistory entry carrying the details + timestamp the helper
+		// should pull through. The orchestrator does the state=RESOLVED + cutoff filtering;
+		// the static helper just consumes the resolved entry.
+		AnalysisHistory latest = mock(AnalysisHistory.class);
+		when(latest.getDetails()).thenReturn("Upgraded lodash to 4.17.21 in v1.5");
+		when(latest.getCreatedDate()).thenReturn(analysisDate);
+
+		String key = ReleaseService.computeAnalysisKey("pkg:npm/lodash@4.17.20", "CVE-2024-9100");
+		Map<String, AnalysisHistory> resolvedHistoryByKey = Map.of(key, latest);
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, findings, resolvedHistoryByKey, null);
+
+		Vulnerability appended = bom.getVulnerabilities().stream()
+				.filter(v -> "CVE-2024-9100".equals(v.getId())).findFirst().orElseThrow();
+		assertEquals("Upgraded lodash to 4.17.21 in v1.5", appended.getAnalysis().getDetail());
+		assertEquals(java.util.Date.from(analysisDate.toInstant()),
+				appended.getAnalysis().getLastUpdated());
+		assertEquals(java.util.Date.from(analysisDate.toInstant()),
+				appended.getAnalysis().getFirstIssued());
+	}
+
+	@Test
+	void appendHistoricallyResolved_noMatchingAnalysis_omitsDetailAndUsesResolvingDate() throws Exception {
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+
+		UUID resolvingUuid = UUID.fromString("00000000-0000-0000-0000-0000000000fd");
+		ZonedDateTime resolveDate = ZonedDateTime.parse("2026-03-01T00:00:00Z");
+		List<HistoricallyResolvedFinding> findings = List.of(
+				hrf("CVE-2024-9101", "pkg:npm/lodash@4.17.20", resolvingUuid, "1.5",
+					resolveDate.toString()));
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, findings, Map.of(), null);
+
+		Vulnerability appended = bom.getVulnerabilities().stream()
+				.filter(v -> "CVE-2024-9101".equals(v.getId())).findFirst().orElseThrow();
+		assertNull(appended.getAnalysis().getDetail(),
+				"No matching VulnAnalysisData → analysis.detail must be omitted");
+		assertEquals(java.util.Date.from(resolveDate.toInstant()),
+				appended.getAnalysis().getLastUpdated());
+	}
+
+	@Test
+	void appendHistoricallyResolved_passesCdx16SchemaValidation() throws Exception {
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+
+		UUID resolvingUuid = UUID.fromString("00000000-0000-0000-0000-0000000000fe");
+		List<HistoricallyResolvedFinding> findings = List.of(
+				hrf("CVE-2024-9200", "pkg:npm/lodash@4.17.20", resolvingUuid, "1.5",
+					"2026-02-01T00:00:00Z"),
+				hrf("CVE-2024-9201", "pkg:maven/org.apache/log4j-core@2.20.0", resolvingUuid, "1.5",
+					"2026-02-01T00:00:00Z"));
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, findings, Map.of(), null);
+
+		BomJsonGenerator gen = BomGeneratorFactory.createJson(Version.VERSION_16, bom);
+		String json = gen.toJsonString();
+
+		JsonParser parser = new JsonParser();
+		java.util.List<ParseException> parseErrors =
+				parser.validate(json.getBytes(StandardCharsets.UTF_8), Version.VERSION_16);
+		assertTrue(parseErrors.isEmpty(),
+				"CDX 1.6 schema must accept bom with historical-resolved entries; got: " + parseErrors);
+	}
+
+	@Test
+	void appendHistoricallyResolved_usesFallbackRefWhenMetadataBomRefMissing() throws Exception {
+		// Real-world case: a release with no sid PURL produces a bom whose metadata.component
+		// has no bom-ref. The orchestrator passes ReleaseData.getPreferredBomIdentifier() as
+		// fallback (sid PURL → any PURL → release UUID); the static helper picks it up.
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+		bom.getMetadata().getComponent().setBomRef(null);
+
+		String fallback = FIXTURE_RELEASE.toString();
+		List<HistoricallyResolvedFinding> findings = List.of(
+				hrf("CVE-2024-9300", "pkg:npm/lodash@4.17.20",
+					UUID.fromString("00000000-0000-0000-0000-0000000000ff"), "1.5",
+					"2026-02-01T00:00:00Z"));
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, findings, Map.of(), fallback);
+
+		Vulnerability appended = bom.getVulnerabilities().stream()
+				.filter(v -> "CVE-2024-9300".equals(v.getId())).findFirst().orElseThrow();
+		assertNotNull(appended.getAffects(), "fallback ref must produce affects[]");
+		assertFalse(appended.getAffects().isEmpty());
+		assertEquals(fallback, appended.getAffects().get(0).getRef());
+	}
+
+	@Test
+	void appendHistoricallyResolved_skipsAffectsWhenNoRefAvailable() throws Exception {
+		// Defensive: if metadata.component has no bom-ref AND no fallback is supplied, skip
+		// affects[] rather than emitting a malformed empty entry. CDX 1.6 schema permits
+		// affects[] omission.
+		Bom bom = invokeTransform(buildVdrLikeFixture(), Boolean.FALSE, Boolean.FALSE);
+		bom.getMetadata().getComponent().setBomRef(null);
+
+		List<HistoricallyResolvedFinding> findings = List.of(
+				hrf("CVE-2024-9301", "pkg:npm/lodash@4.17.20",
+					UUID.fromString("00000000-0000-0000-0000-0000000000fe"), "1.5",
+					"2026-02-01T00:00:00Z"));
+
+		ReleaseService.appendHistoricallyResolvedToBom(bom, findings, Map.of(), null);
+
+		Vulnerability appended = bom.getVulnerabilities().stream()
+				.filter(v -> "CVE-2024-9301".equals(v.getId())).findFirst().orElseThrow();
+		assertTrue(appended.getAffects() == null || appended.getAffects().isEmpty(),
+				"no fallback + no metadata bom-ref → affects[] must be omitted");
 	}
 }

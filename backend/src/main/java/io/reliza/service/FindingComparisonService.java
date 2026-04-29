@@ -4,12 +4,14 @@
 
 package io.reliza.service;
 
+import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -23,12 +25,15 @@ import org.springframework.stereotype.Service;
 
 import io.reliza.dto.ComponentAttribution;
 import io.reliza.dto.FindingChangesWithAttribution;
+import io.reliza.dto.HistoricallyResolvedFinding;
 import io.reliza.dto.OrgLevelContext;
 import io.reliza.dto.ViolationWithAttribution;
 import io.reliza.dto.VulnerabilityWithAttribution;
 import io.reliza.dto.WeaknessWithAttribution;
 import io.reliza.model.ComponentData;
+import io.reliza.model.ComponentData.ComponentType;
 import io.reliza.model.ReleaseData;
+import io.reliza.model.ReleaseData.ReleaseLifecycle;
 import io.reliza.dto.FindingChangesRecord;
 import io.reliza.model.dto.ReleaseMetricsDto;
 import io.reliza.model.dto.ReleaseMetricsDto.ViolationDto;
@@ -51,7 +56,8 @@ public class FindingComparisonService {
 	
 	private final BranchService branchService;
 	private final SharedReleaseService sharedReleaseService;
-	
+	private final GetComponentService getComponentService;
+
 	private static final String FINDING_KEY_DELIMITER = "|";
 	
 	/**
@@ -830,5 +836,154 @@ public class FindingComparisonService {
 		return buildAttributedFindings(maps,
 			(key, fa) -> computeOrgFindingFlags(key, fa, inheritedInComponents, totalComponents));
 	}
-	
+
+	/**
+	 * For a given target release, return all vulnerabilities that were detected in some prior
+	 * release on the target's lineage (its branch + fork-point ancestry; or unioned across child
+	 * component releases for products) but are absent from the target's current metrics.
+	 *
+	 * <p>Reuses the existing {@link #compareMetrics} primitive on each consecutive release pair
+	 * along the lineage. Iterates oldest -> newest so that, for CVEs that resolve more than once
+	 * on a lineage, the latest resolution wins by overwrite.
+	 *
+	 * @param target            the release we are emitting VEX for
+	 * @param recurseChildren   if {@code true} and {@code target} is a {@code PRODUCT}, recurse
+	 *                          into the current child component releases and union the results
+	 *                          (deduplicating by {@code (vulnId, purl)} with latest-resolution
+	 *                          preferred)
+	 * @param cutOffDate        if non-null, exclude resolutions whose resolving-release
+	 *                          {@code createdDate} is strictly after this date (used for
+	 *                          historical snapshots)
+	 * @return historical-resolved findings; empty list if none
+	 */
+	public List<HistoricallyResolvedFinding> findHistoricallyResolvedForRelease(
+			ReleaseData target,
+			boolean recurseChildren,
+			ZonedDateTime cutOffDate) throws Exception {
+
+		if (target == null) return List.of();
+
+		// Product short-circuit: walk each child release's lineage and union (latest-resolution wins).
+		if (recurseChildren && target.getComponent() != null) {
+			Optional<ComponentData> compOpt = getComponentService.getComponentData(target.getComponent());
+			if (compOpt.isPresent() && compOpt.get().getType() == ComponentType.PRODUCT) {
+				Map<String, HistoricallyResolvedFinding> productMap = new LinkedHashMap<>();
+				Set<ReleaseData> children = sharedReleaseService.unwindReleaseDependencies(target);
+				for (ReleaseData childRelease : children) {
+					// recurseChildren=false: a child's release dependency tree is (per data model)
+					// a single component, not nested products.
+					List<HistoricallyResolvedFinding> childResults =
+							findHistoricallyResolvedForRelease(childRelease, false, cutOffDate);
+					for (HistoricallyResolvedFinding f : childResults) {
+						String key = f.vulnerability().vulnId() + FINDING_KEY_DELIMITER
+								+ (f.vulnerability().purl() != null ? f.vulnerability().purl() : "");
+						HistoricallyResolvedFinding existing = productMap.get(key);
+						if (existing == null
+								|| (f.resolvingReleaseCreatedDate() != null
+									&& existing.resolvingReleaseCreatedDate() != null
+									&& f.resolvingReleaseCreatedDate().isAfter(existing.resolvingReleaseCreatedDate()))) {
+							productMap.put(key, f);
+						}
+					}
+				}
+				return new ArrayList<>(productMap.values());
+			}
+		}
+
+		List<ReleaseData> lineage = buildLineage(target);
+		if (cutOffDate != null) {
+			lineage = lineage.stream()
+					.filter(r -> r.getCreatedDate() != null && !r.getCreatedDate().isAfter(cutOffDate))
+					.collect(Collectors.toList());
+		}
+		if (lineage.size() < 2) return List.of();
+
+		Set<String> targetVulnKeys = new HashSet<>();
+		if (target.getMetrics() != null && target.getMetrics().getVulnerabilityDetails() != null) {
+			for (VulnerabilityDto v : target.getMetrics().getVulnerabilityDetails()) {
+				targetVulnKeys.add(VULN_KEY.apply(v));
+			}
+		}
+
+		Map<String, HistoricallyResolvedFinding> resolvedMap = new LinkedHashMap<>();
+		for (int i = 0; i < lineage.size() - 1; i++) {
+			ReleaseData older = lineage.get(i);
+			ReleaseData newer = lineage.get(i + 1);
+			if (older.getMetrics() == null || newer.getMetrics() == null) continue;
+			FindingChangesRecord changes = compareMetrics(older.getMetrics(), newer.getMetrics());
+			if (changes == null || changes.resolvedVulnerabilities() == null) continue;
+			for (VulnerabilityDto resolvedVuln : changes.resolvedVulnerabilities()) {
+				String key = VULN_KEY.apply(resolvedVuln);
+				if (targetVulnKeys.contains(key)) continue;
+				resolvedMap.put(key, new HistoricallyResolvedFinding(
+						resolvedVuln,
+						newer.getUuid(),
+						newer.getVersion(),
+						newer.getCreatedDate()));
+			}
+		}
+		return new ArrayList<>(resolvedMap.values());
+	}
+
+	/**
+	 * Build the lineage release list — every release that {@code target} "inherits" from,
+	 * ordered oldest -> newest, ending at {@code target}. Walks the target's branch up to and
+	 * including {@code target}, then traverses fork points to ancestor branches recursively.
+	 *
+	 * <p>Mirrors the changelog's {@code processForkPointAndPairwise} fork-point convention:
+	 * a "different-branch" return from {@code findPreviousReleasesOfBranchForRelease} is a
+	 * fork point; a same-branch return means we've already covered the predecessor.
+	 */
+	private List<ReleaseData> buildLineage(ReleaseData target) {
+		LinkedList<ReleaseData> chain = new LinkedList<>();
+		Set<UUID> visited = new HashSet<>();
+		Map<UUID, Optional<UUID>> baseBranchCache = new HashMap<>();
+
+		ReleaseData cursor = target;
+		while (cursor != null && !visited.contains(cursor.getBranch())) {
+			visited.add(cursor.getBranch());
+
+			// sorted=false: we re-sort by createdDate below; the version-aware sort would cost
+			// two extra DB lookups (BranchData + ComponentData) per iteration for a result we
+			// immediately discard.
+			List<ReleaseData> branchReleases = sharedReleaseService
+					.listReleaseDataOfBranch(cursor.getBranch(), Integer.MAX_VALUE, /*sorted=*/ false);
+			if (branchReleases == null) branchReleases = List.of();
+			ZonedDateTime cursorCreated = cursor.getCreatedDate();
+			List<ReleaseData> filtered = new ArrayList<>();
+			for (ReleaseData r : branchReleases) {
+				// Skip CANCELLED / REJECTED — their metrics may be incomplete and a null pair would
+				// silently break the chain (older→cancelled and cancelled→newer both skipped, leaving
+				// older never compared with newer).
+				if (r.getLifecycle() == ReleaseLifecycle.CANCELLED
+						|| r.getLifecycle() == ReleaseLifecycle.REJECTED) {
+					continue;
+				}
+				if (r.getCreatedDate() != null && cursorCreated != null
+						&& !r.getCreatedDate().isAfter(cursorCreated)) {
+					filtered.add(r);
+				}
+			}
+			filtered.sort(Comparator.comparing(ReleaseData::getCreatedDate));
+			chain.addAll(0, filtered);
+
+			if (filtered.isEmpty()) break;
+			ReleaseData oldestOfBranch = filtered.get(0);
+
+			UUID forkPointId = sharedReleaseService.findPreviousReleasesOfBranchForRelease(
+					cursor.getBranch(), oldestOfBranch.getUuid(), oldestOfBranch,
+					/*componentData=*/ null, baseBranchCache);
+			if (forkPointId == null) break;
+
+			Optional<ReleaseData> forkOpt = sharedReleaseService.getReleaseData(forkPointId);
+			if (forkOpt.isEmpty()) break;
+			ReleaseData fork = forkOpt.get();
+			if (fork.getBranch().equals(cursor.getBranch())) break;
+
+			cursor = fork;
+		}
+
+		return chain;
+	}
+
 }

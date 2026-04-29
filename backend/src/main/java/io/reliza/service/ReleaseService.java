@@ -101,6 +101,7 @@ import io.reliza.model.dto.AnalyticsDtos.VegaDateValue;
 import io.reliza.model.dto.BranchDto;
 import io.reliza.model.dto.ReleaseDto;
 import io.reliza.model.dto.SceDto;
+import io.reliza.dto.HistoricallyResolvedFinding;
 import io.reliza.model.tea.TeaChecksumType;
 import io.reliza.model.tea.TeaIdentifierType;
 import io.reliza.model.tea.Rebom.RebomOptions;
@@ -165,6 +166,9 @@ public class ReleaseService {
 	
 	@Autowired
 	private VulnAnalysisService vulnAnalysisService;
+
+	@Autowired
+	private FindingComparisonService findingComparisonService;
 
 	@Autowired
 	@org.springframework.context.annotation.Lazy
@@ -1752,6 +1756,7 @@ public class ReleaseService {
 			ZonedDateTime cutOffDate, VdrSnapshotType snapshotType, String snapshotValue) throws Exception {
 		Bom bom = buildVdrBom(releaseData, includeSuppressed, cutOffDate, snapshotType, snapshotValue);
 		transformVdrBomToCdxVex(bom, releaseData.getUuid(), includeInTriage, cutOffDate, snapshotType, snapshotValue, includeSuppressed);
+		appendHistoricallyResolvedFindings(bom, releaseData, cutOffDate);
 		return bom;
 	}
 
@@ -1811,6 +1816,269 @@ public class ReleaseService {
 		vexMarker.setName(VdrMetadataProperty.VEX_DOCUMENT.toString());
 		vexMarker.setValue("true");
 		metadata.getProperties().add(vexMarker);
+	}
+
+	/**
+	 * Pick the latest {@link VulnAnalysisData.AnalysisHistory} entry whose {@code createdDate}
+	 * is at or before {@code cutOffDate}. If {@code cutOffDate} is null, returns the latest
+	 * entry unconditionally. Returns {@code null} if the history is null/empty or every entry
+	 * is after the cutoff.
+	 *
+	 * <p>Shared by {@link #transformVulnerabilityToVdr} (current-state path) and the
+	 * orchestrator that feeds {@link #appendHistoricallyResolvedToBom} (historical-resolved
+	 * path) so analysis-snapshot semantics stay consistent across both VEX surfaces.
+	 */
+	static VulnAnalysisData.AnalysisHistory latestAnalysisHistoryAtOrBefore(
+			List<VulnAnalysisData.AnalysisHistory> history, ZonedDateTime cutOffDate) {
+		if (history == null || history.isEmpty()) return null;
+		if (cutOffDate == null) return history.get(history.size() - 1);
+		for (int i = history.size() - 1; i >= 0; i--) {
+			VulnAnalysisData.AnalysisHistory entry = history.get(i);
+			if (entry.getCreatedDate() != null && !entry.getCreatedDate().isAfter(cutOffDate)) {
+				return entry;
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Populate the common CDX vulnerability fields (source, ratings, description, cwes,
+	 * references, published/updated) from a {@link VulnerabilityDto}. Shared by
+	 * {@link #buildVdrVulnerabilityEntry} and {@link #appendHistoricallyResolvedToBom} so the
+	 * source-prefix mapping and field carry-through stay in sync between current and
+	 * historical entries.
+	 */
+	static void setVulnerabilityCommonFields(Vulnerability vuln, VulnerabilityDto vulnDto) {
+		Source source = new Source();
+		if (vulnDto.vulnId() != null) {
+			if (vulnDto.vulnId().startsWith("CVE-")) {
+				source.setName("NVD");
+				source.setUrl("https://nvd.nist.gov/vuln/detail/" + vulnDto.vulnId());
+			} else if (vulnDto.vulnId().startsWith("GHSA-")) {
+				source.setName("GitHub Advisory");
+				source.setUrl("https://github.com/advisories/" + vulnDto.vulnId());
+			} else {
+				source.setName("Other");
+			}
+		}
+		vuln.setSource(source);
+
+		if (vulnDto.severity() != null) {
+			Rating rating = new Rating();
+			rating.setSeverity(mapVdrSeverity(vulnDto.severity()));
+			vuln.setRatings(List.of(rating));
+		}
+		if (StringUtils.isNotBlank(vulnDto.description())) {
+			vuln.setDescription(vulnDto.description());
+		}
+		List<Integer> cweInts = parseCwesToCdxIntegers(vulnDto.cwes());
+		if (!cweInts.isEmpty()) vuln.setCwes(cweInts);
+		if (vulnDto.references() != null && !vulnDto.references().isEmpty()) {
+			List<Vulnerability.Reference> refs = new ArrayList<>();
+			for (VulnerabilityReferenceDto refDto : vulnDto.references()) {
+				Vulnerability.Reference ref = new Vulnerability.Reference();
+				ref.setId(refDto.id());
+				if (refDto.sourceName() != null || refDto.sourceUrl() != null) {
+					Source refSource = new Source();
+					refSource.setName(refDto.sourceName());
+					refSource.setUrl(refDto.sourceUrl());
+					ref.setSource(refSource);
+				}
+				refs.add(ref);
+			}
+			vuln.setReferences(refs);
+		}
+		if (vulnDto.published() != null) {
+			vuln.setPublished(Date.from(vulnDto.published().toInstant()));
+		}
+		if (vulnDto.updated() != null) {
+			vuln.setUpdated(Date.from(vulnDto.updated().toInstant()));
+		}
+	}
+
+	/**
+	 * Append historically-resolved findings to a CycloneDX VEX bom. Pure — no Spring state,
+	 * no service collaborators. Each finding becomes a {@link Vulnerability} entry with
+	 * {@code analysis.state = RESOLVED}, {@code affects[].ref} pointing at the product
+	 * (bom.metadata.component, or the fallback ref if that has no bom-ref), and provenance
+	 * properties.
+	 *
+	 * <p>If a CVE id is already represented in {@code bom.vulnerabilities[]}, the historical entry
+	 * is skipped (defensive — upstream {@link FindingComparisonService#findHistoricallyResolvedForRelease}
+	 * already excludes CVEs present in the target's current metrics).
+	 *
+	 * @param bom                       the CDX VEX bom (already passed through {@link #transformVdrBomToCdxVex})
+	 * @param findings                  historical-resolved findings to emit
+	 * @param resolvedHistoryByKey      map keyed by {@link #computeAnalysisKey} carrying the
+	 *                                  pre-resolved {@link VulnAnalysisData.AnalysisHistory}
+	 *                                  entry to enrich {@code analysis.detail} and timestamps.
+	 *                                  Callers (typically the orchestrator) build this from
+	 *                                  {@link #buildAnalysisByKey} + state filter +
+	 *                                  {@link #latestAnalysisHistoryAtOrBefore} so cutoff
+	 *                                  semantics are applied consistently with the current-state
+	 *                                  VEX path. Empty map = no enrichment; entry timestamps
+	 *                                  fall back to the resolving release's createdDate.
+	 * @param fallbackProductRef        used as {@code affects[].ref} when {@code bom.metadata.component}
+	 *                                  has no bom-ref. Callers should pass
+	 *                                  {@link io.reliza.model.ReleaseData#getPreferredBomIdentifier}
+	 *                                  (the canonical sid PURL → any PURL → release UUID chain).
+	 *                                  Pass {@code null} to skip {@code affects[]} when no ref
+	 *                                  is available.
+	 */
+	static void appendHistoricallyResolvedToBom(
+			Bom bom,
+			List<HistoricallyResolvedFinding> findings,
+			Map<String, VulnAnalysisData.AnalysisHistory> resolvedHistoryByKey,
+			String fallbackProductRef) {
+
+		if (bom == null || findings == null || findings.isEmpty()) return;
+
+		// Existing CVE ids — defensive dedup against any survivor of the transform step.
+		Set<String> existingIds = new HashSet<>();
+		if (bom.getVulnerabilities() != null) {
+			for (Vulnerability v : bom.getVulnerabilities()) {
+				if (v.getId() != null) existingIds.add(v.getId());
+			}
+		}
+
+		String productBomRef = null;
+		if (bom.getMetadata() != null && bom.getMetadata().getComponent() != null) {
+			productBomRef = bom.getMetadata().getComponent().getBomRef();
+		}
+		if (productBomRef == null || productBomRef.isBlank()) {
+			productBomRef = fallbackProductRef;
+		}
+
+		List<Vulnerability> additions = new ArrayList<>();
+		for (HistoricallyResolvedFinding f : findings) {
+			String id = f.vulnerability().vulnId();
+			if (id == null || existingIds.contains(id)) continue;
+
+			Vulnerability v = new Vulnerability();
+			v.setBomRef(UUID.randomUUID().toString());
+			v.setId(id);
+
+			// Source / severity / description / cwes / references / dates from the source DTO.
+			setVulnerabilityCommonFields(v, f.vulnerability());
+
+			// Analysis: state = RESOLVED, with optional enrichment from a pre-resolved AnalysisHistory entry.
+			Vulnerability.Analysis a = new Vulnerability.Analysis();
+			a.setState(Vulnerability.Analysis.State.RESOLVED);
+			ZonedDateTime issuedAt = f.resolvingReleaseCreatedDate();
+			VulnAnalysisData.AnalysisHistory enrichment = resolvedHistoryByKey.get(computeAnalysisKey(
+					f.vulnerability().purl(), f.vulnerability().vulnId()));
+			if (enrichment != null) {
+				if (enrichment.getDetails() != null && !enrichment.getDetails().isBlank()) {
+					a.setDetail(enrichment.getDetails());
+				}
+				if (enrichment.getCreatedDate() != null) issuedAt = enrichment.getCreatedDate();
+			}
+			if (issuedAt != null) {
+				Date asDate = Date.from(issuedAt.toInstant());
+				a.setFirstIssued(asDate);
+				a.setLastUpdated(asDate);
+			}
+			v.setAnalysis(a);
+
+			// affects[]: point at the product (metadata.component) — not the historical transitive
+			// component, which isn't in the current components[].
+			if (productBomRef != null) {
+				Vulnerability.Affect affect = new Vulnerability.Affect();
+				affect.setRef(productBomRef);
+				v.setAffects(List.of(affect));
+			}
+
+			// Provenance properties.
+			List<Property> props = new ArrayList<>();
+			if (f.resolvingReleaseUuid() != null) {
+				Property pRel = new Property();
+				pRel.setName("rearm:vex:resolvedInRelease");
+				pRel.setValue(f.resolvingReleaseUuid().toString());
+				props.add(pRel);
+			}
+			if (f.resolvingReleaseVersion() != null && !f.resolvingReleaseVersion().isBlank()) {
+				Property pVer = new Property();
+				pVer.setName("rearm:vex:resolvedInVersion");
+				pVer.setValue(f.resolvingReleaseVersion());
+				props.add(pVer);
+			}
+			if (!props.isEmpty()) {
+				v.setProperties(props);
+			}
+
+			additions.add(v);
+			existingIds.add(id);   // collapse multi-purl historical findings of the same CVE id
+		}
+
+		if (additions.isEmpty()) return;
+		if (bom.getVulnerabilities() == null) {
+			bom.setVulnerabilities(new ArrayList<>());
+		}
+		bom.getVulnerabilities().addAll(additions);
+	}
+
+	/**
+	 * Build a map keyed by {@link #computeAnalysisKey} from every {@link VulnAnalysisData}
+	 * affecting a release. Exception-safe — failures are logged at debug and an empty map is
+	 * returned. Shared between {@link #buildVdrBom} (current-state path) and
+	 * {@link #appendHistoricallyResolvedFindings} (historical-resolved path) so the lookup
+	 * shape stays consistent.
+	 */
+	private Map<String, VulnAnalysisData> buildAnalysisByKey(UUID releaseUuid) {
+		Map<String, VulnAnalysisData> map = new HashMap<>();
+		try {
+			List<VulnAnalysisData> all = vulnAnalysisService.findAllVulnAnalysisAffectingRelease(releaseUuid);
+			for (VulnAnalysisData vad : all) {
+				map.put(computeAnalysisKey(vad.getLocation(), vad.getFindingId()), vad);
+			}
+		} catch (Exception e) {
+			log.debug("Could not fetch analysis records for release {}: {}", releaseUuid, e.getMessage());
+		}
+		return map;
+	}
+
+	/**
+	 * Orchestrator for the historical-resolved enrichment step. Fetches the historical-resolved
+	 * set from {@link FindingComparisonService}, pre-resolves matching {@link VulnAnalysisData}
+	 * records into AnalysisHistory entries (state=RESOLVED, latest at-or-before cutOffDate),
+	 * and delegates to the pure static {@link #appendHistoricallyResolvedToBom}.
+	 *
+	 * <p>Exception-safe — lookup failures are swallowed by {@link #buildAnalysisByKey}; this
+	 * method's own try/catch covers the lineage walk. VEX export must not fail because of an
+	 * enrichment hiccup.
+	 */
+	private void appendHistoricallyResolvedFindings(Bom bom, ReleaseData releaseData,
+			ZonedDateTime cutOffDate) {
+		List<HistoricallyResolvedFinding> findings;
+		try {
+			findings = findingComparisonService.findHistoricallyResolvedForRelease(
+					releaseData, /*recurseChildren=*/ true, cutOffDate);
+		} catch (Exception e) {
+			log.debug("Historical-resolved lookup failed for release {}: {}",
+					releaseData.getUuid(), e.getMessage());
+			return;
+		}
+		if (findings == null || findings.isEmpty()) return;
+
+		// Pre-resolve VulnAnalysisData → AnalysisHistory entries: filter by state=RESOLVED and
+		// pick the latest history entry at-or-before cutOffDate (mirrors the current-state VEX
+		// path at transformVulnerabilityToVdr, so snapshot semantics are uniform).
+		Map<String, VulnAnalysisData> rawByKey = buildAnalysisByKey(releaseData.getUuid());
+		Map<String, VulnAnalysisData.AnalysisHistory> resolvedHistoryByKey = new HashMap<>();
+		for (Map.Entry<String, VulnAnalysisData> e : rawByKey.entrySet()) {
+			VulnAnalysisData vad = e.getValue();
+			if (vad.getAnalysisState() != AnalysisState.RESOLVED) continue;
+			VulnAnalysisData.AnalysisHistory entry = latestAnalysisHistoryAtOrBefore(
+					vad.getAnalysisHistory(), cutOffDate);
+			if (entry != null) resolvedHistoryByKey.put(e.getKey(), entry);
+		}
+
+		// Releases may have no metadata.component bom-ref (no sid PURL set). Fall back to the
+		// codebase-canonical "preferred bom identifier" chain: sid PURL > any other PURL >
+		// release UUID string (always non-null). Same chain used by the dependency
+		// release-component path further down, and by ReleaseData.getPreferredBomIdentifier.
+		String fallbackProductRef = releaseData.getPreferredBomIdentifier();
+		appendHistoricallyResolvedToBom(bom, findings, resolvedHistoryByKey, fallbackProductRef);
 	}
 
 	/**
@@ -2033,31 +2301,12 @@ public class ReleaseService {
 			bom.setComponents(components);
 			
 			// Fetch analysis records for this release (without dependencies)
-			Map<String, VulnAnalysisData> analysisMap = new HashMap<>();
-			try {
-				List<VulnAnalysisData> allAnalyses = vulnAnalysisService.findAllVulnAnalysisAffectingRelease(releaseData.getUuid());
-				for (VulnAnalysisData analysis : allAnalyses) {
-					String key = computeAnalysisKey(analysis.getLocation(), analysis.getFindingId());
-					analysisMap.put(key, analysis);
-				}
-			} catch (Exception e) {
-				log.debug("Could not fetch analysis records for release {}: {}", releaseData.getUuid(), e.getMessage());
-			}
+			Map<String, VulnAnalysisData> analysisMap = buildAnalysisByKey(releaseData.getUuid());
 			
 			// Also fetch analysis records for each dependency release
 			Map<UUID, Map<String, VulnAnalysisData>> releaseAnalysisMaps = new HashMap<>();
 			for (UUID releaseUuid : allReleaseUuids) {
-				try {
-					Map<String, VulnAnalysisData> relAnalysisMap = new HashMap<>();
-					List<VulnAnalysisData> relAnalyses = vulnAnalysisService.findAllVulnAnalysisAffectingRelease(releaseUuid);
-					for (VulnAnalysisData analysis : relAnalyses) {
-						String key = computeAnalysisKey(analysis.getLocation(), analysis.getFindingId());
-						relAnalysisMap.put(key, analysis);
-					}
-					releaseAnalysisMaps.put(releaseUuid, relAnalysisMap);
-				} catch (Exception e) {
-					log.debug("Could not fetch analysis records for dependency release {}: {}", releaseUuid, e.getMessage());
-				}
+				releaseAnalysisMaps.put(releaseUuid, buildAnalysisByKey(releaseUuid));
 			}
 			
 			// Build VDR context for transformation
@@ -2170,54 +2419,8 @@ public class ReleaseService {
 		// Set vulnerability ID
 		vuln.setId(vulnDto.vulnId());
 		
-		// Set source based on vulnerability ID prefix
-		Source source = new Source();
-		if (vulnDto.vulnId() != null) {
-			if (vulnDto.vulnId().startsWith("CVE-")) {
-				source.setName("NVD");
-				source.setUrl("https://nvd.nist.gov/vuln/detail/" + vulnDto.vulnId());
-			} else if (vulnDto.vulnId().startsWith("GHSA-")) {
-				source.setName("GitHub Advisory");
-				source.setUrl("https://github.com/advisories/" + vulnDto.vulnId());
-			} else {
-				source.setName("Other");
-			}
-		}
-		vuln.setSource(source);
-		
-		// Set severity rating
-		if (vulnDto.severity() != null) {
-			Rating rating = new Rating();
-			rating.setSeverity(mapVdrSeverity(vulnDto.severity()));
-			vuln.setRatings(List.of(rating));
-		}
-
-		if (StringUtils.isNotBlank(vulnDto.description())) {
-			vuln.setDescription(vulnDto.description());
-		}
-		List<Integer> cweInts = parseCwesToCdxIntegers(vulnDto.cwes());
-		if (!cweInts.isEmpty()) vuln.setCwes(cweInts);
-		if (vulnDto.references() != null && !vulnDto.references().isEmpty()) {
-			List<Vulnerability.Reference> refs = new ArrayList<>();
-			for (VulnerabilityReferenceDto refDto : vulnDto.references()) {
-				Vulnerability.Reference ref = new Vulnerability.Reference();
-				ref.setId(refDto.id());
-				if (refDto.sourceName() != null || refDto.sourceUrl() != null) {
-					Source refSource = new Source();
-					refSource.setName(refDto.sourceName());
-					refSource.setUrl(refDto.sourceUrl());
-					ref.setSource(refSource);
-				}
-				refs.add(ref);
-			}
-			vuln.setReferences(refs);
-		}
-		if (vulnDto.published() != null) {
-			vuln.setPublished(Date.from(vulnDto.published().toInstant()));
-		}
-		if (vulnDto.updated() != null) {
-			vuln.setUpdated(Date.from(vulnDto.updated().toInstant()));
-		}
+		// Source / severity / description / cwes / references / dates from the source DTO.
+		setVulnerabilityCommonFields(vuln, vulnDto);
 
 		// Build affects list - include both PURL and release bom-refs
 		List<Vulnerability.Affect> affects = new ArrayList<>();
@@ -2289,53 +2492,36 @@ public class ReleaseService {
 			}
 			
 			if (analysisData != null) {
-				List<VulnAnalysisData.AnalysisHistory> history = analysisData.getAnalysisHistory();
-				if (history != null && !history.isEmpty()) {
-					VulnAnalysisData.AnalysisHistory targetHistory = null;
-					
-					if (cutOffDate != null) {
-						// Find the latest history entry before or on cutOffDate
-						for (int i = history.size() - 1; i >= 0; i--) {
-							VulnAnalysisData.AnalysisHistory entry = history.get(i);
-							if (entry.getCreatedDate() != null && !entry.getCreatedDate().isAfter(cutOffDate)) {
-								targetHistory = entry;
-								break;
-							}
-						}
-					} else {
-						// No cutoff date, use the latest
-						targetHistory = history.get(history.size() - 1);
+				VulnAnalysisData.AnalysisHistory targetHistory = latestAnalysisHistoryAtOrBefore(
+						analysisData.getAnalysisHistory(), cutOffDate);
+				if (targetHistory != null) {
+					if (targetHistory.getState() != null) {
+						analysis.setState(mapVdrAnalysisState(targetHistory.getState()));
 					}
-					
-					if (targetHistory != null) {
-						if (targetHistory.getState() != null) {
-							analysis.setState(mapVdrAnalysisState(targetHistory.getState()));
-						}
-						if (targetHistory.getJustification() != null) {
-							analysis.setJustification(mapVdrAnalysisJustification(targetHistory.getJustification()));
-						}
-						if (StringUtils.isNotEmpty(targetHistory.getDetails())) {
-							analysis.setDetail(targetHistory.getDetails());
-						}
-						// CISA VEX action-statement fields (CDX 1.4+)
-						List<AnalysisResponse> historyResponses = targetHistory.getResponses();
-						if (historyResponses != null && !historyResponses.isEmpty()) {
-							analysis.setResponses(historyResponses.stream()
-									.map(ReleaseService::mapVdrAnalysisResponse)
-									.toList());
-						}
-						if (StringUtils.isNotBlank(targetHistory.getRecommendation())) {
-							vuln.setRecommendation(targetHistory.getRecommendation());
-						}
-						if (StringUtils.isNotBlank(targetHistory.getWorkaround())) {
-							vuln.setWorkaround(targetHistory.getWorkaround());
-						}
-						// Override severity if analysis history changed it
-						if (targetHistory.getSeverity() != null) {
-							Rating rating = new Rating();
-							rating.setSeverity(mapVdrSeverity(targetHistory.getSeverity()));
-							vuln.setRatings(List.of(rating));
-						}
+					if (targetHistory.getJustification() != null) {
+						analysis.setJustification(mapVdrAnalysisJustification(targetHistory.getJustification()));
+					}
+					if (StringUtils.isNotEmpty(targetHistory.getDetails())) {
+						analysis.setDetail(targetHistory.getDetails());
+					}
+					// CISA VEX action-statement fields (CDX 1.4+)
+					List<AnalysisResponse> historyResponses = targetHistory.getResponses();
+					if (historyResponses != null && !historyResponses.isEmpty()) {
+						analysis.setResponses(historyResponses.stream()
+								.map(ReleaseService::mapVdrAnalysisResponse)
+								.toList());
+					}
+					if (StringUtils.isNotBlank(targetHistory.getRecommendation())) {
+						vuln.setRecommendation(targetHistory.getRecommendation());
+					}
+					if (StringUtils.isNotBlank(targetHistory.getWorkaround())) {
+						vuln.setWorkaround(targetHistory.getWorkaround());
+					}
+					// Override severity if analysis history changed it
+					if (targetHistory.getSeverity() != null) {
+						Rating rating = new Rating();
+						rating.setSeverity(mapVdrSeverity(targetHistory.getSeverity()));
+						vuln.setRatings(List.of(rating));
 					}
 				} else {
 					// Fallback if history is empty but we have top-level fields (legacy data)
@@ -2354,7 +2540,7 @@ public class ReleaseService {
 		return vuln;
 	}
 
-	private String computeAnalysisKey(String purl, String vulnId) {
+	static String computeAnalysisKey(String purl, String vulnId) {
 		return Utils.minimizePurl(purl) + "|" + vulnId;
 	}
 	
@@ -2420,7 +2606,7 @@ public class ReleaseService {
 	/**
 	 * Map internal severity to CycloneDX severity
 	 */
-	private org.cyclonedx.model.vulnerability.Vulnerability.Rating.Severity mapVdrSeverity(VulnerabilitySeverity severity) {
+	private static org.cyclonedx.model.vulnerability.Vulnerability.Rating.Severity mapVdrSeverity(VulnerabilitySeverity severity) {
 		return switch (severity) {
 			case CRITICAL -> org.cyclonedx.model.vulnerability.Vulnerability.Rating.Severity.CRITICAL;
 			case HIGH -> org.cyclonedx.model.vulnerability.Vulnerability.Rating.Severity.HIGH;

@@ -480,4 +480,31 @@ public class OpenVexServiceTest {
 		v.setAnalysis(analysis);
 		return v;
 	}
+
+	@Test
+	void buildStatement_resolvedState_producesFixedStatementWithNoForbiddenFields() {
+		Vulnerability v = new Vulnerability();
+		v.setBomRef(UUID.randomUUID().toString());
+		v.setId("CVE-2024-9300");
+		Vulnerability.Source src = new Vulnerability.Source();
+		src.setName("NVD");
+		v.setSource(src);
+		Vulnerability.Analysis a = new Vulnerability.Analysis();
+		a.setState(Vulnerability.Analysis.State.RESOLVED);
+		v.setAnalysis(a);
+		Vulnerability.Affect aff = new Vulnerability.Affect();
+		aff.setRef("urn:uuid:c7f9b2a4-1108-4c63-9e77-2d3b4c5a6f11");
+		v.setAffects(List.of(aff));
+
+		Map<String, Object> stmt = OpenVexService.buildStatement(v, "urn:uuid:c7f9b2a4-1108-4c63-9e77-2d3b4c5a6f11");
+
+		assertNotNull(stmt, "RESOLVED state must produce an OpenVEX statement (no filtering)");
+		assertEquals("fixed", stmt.get("status"));
+		assertNull(stmt.get("justification"),
+				"fixed status must not carry justification (Strict L15)");
+		assertNull(stmt.get("impact_statement"),
+				"fixed status must not carry impact_statement (Strict L15)");
+		assertNull(stmt.get("action_statement"),
+				"fixed status must not carry action_statement (Strict L15)");
+	}
 }
