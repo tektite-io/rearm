@@ -152,7 +152,8 @@ public final class ChangelogRecords {
 		ReleaseLifecycle lifecycle,
 		List<CodeCommit> commits,
 		ReleaseSbomChanges sbomChanges,
-		ReleaseFindingChanges findingChanges
+		ReleaseFindingChanges findingChanges,
+		ZonedDateTime createdDate
 	) {}
 	
 	/**

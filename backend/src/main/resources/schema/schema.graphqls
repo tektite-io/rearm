@@ -850,6 +850,7 @@ type NoneReleaseChanges {
 	commits: [CodeCommit!]!
 	sbomChanges: ReleaseSbomChanges!
 	findingChanges: ReleaseFindingChanges!
+	createdDate: DateTime!
 }
 
 type CodeCommit {

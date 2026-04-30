@@ -657,7 +657,8 @@ public class ChangeLogService {
 					currentRelease.getLifecycle(),
 					commits,
 					sbomChanges,
-					findingChanges
+					findingChanges,
+					currentRelease.getCreatedDate()
 				));
 			}
 			
@@ -1142,7 +1143,7 @@ public class ChangeLogService {
 						if (aggregationType == AggregationType.NONE) {
 							allNoneBranchChanges.add(new NoneBranchChanges(
 								branchId, branchName, componentUuid, componentData.getName(),
-								List.of(new NoneReleaseChanges(targetReleaseUuid, targetRelease.getDecoratedVersionString(userTimeZone), targetRelease.getLifecycle(), List.of(), EMPTY_SBOM_CHANGES, EMPTY_FINDING_CHANGES)),
+								List.of(new NoneReleaseChanges(targetReleaseUuid, targetRelease.getDecoratedVersionString(userTimeZone), targetRelease.getLifecycle(), List.of(), EMPTY_SBOM_CHANGES, EMPTY_FINDING_CHANGES, targetRelease.getCreatedDate())),
 								ChangeType.ADDED));
 						} else {
 							allAggregatedBranchChanges.add(new AggregatedBranchChanges(
@@ -1174,7 +1175,7 @@ public class ChangeLogService {
 						if (aggregationType == AggregationType.NONE) {
 							allNoneBranchChanges.add(new NoneBranchChanges(
 								branchId, branchName, componentUuid, componentData.getName(),
-								List.of(new NoneReleaseChanges(baselineReleaseUuid, baselineRelease.getDecoratedVersionString(userTimeZone), baselineRelease.getLifecycle(), List.of(), EMPTY_SBOM_CHANGES, EMPTY_FINDING_CHANGES)),
+								List.of(new NoneReleaseChanges(baselineReleaseUuid, baselineRelease.getDecoratedVersionString(userTimeZone), baselineRelease.getLifecycle(), List.of(), EMPTY_SBOM_CHANGES, EMPTY_FINDING_CHANGES, baselineRelease.getCreatedDate())),
 								ChangeType.REMOVED));
 						} else {
 							allAggregatedBranchChanges.add(new AggregatedBranchChanges(
