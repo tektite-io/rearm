@@ -184,17 +184,24 @@
                             <n-form-item v-if="createIntegrationObject.type === 'GITHUB' || createIntegrationObject.type === 'GITHUB_VALIDATE'" id="org_settings_create_github_integration_secret_group" label="GitHub Private Key"
                                 label-for="org_settings_create_github_integration_secret"
                                 description="Paste the .pem GitHub provides, upload the file directly, or paste a pre-converted DER base64 blob. Backend normalizes all three.">
-                                <n-space vertical>
+                                <n-space vertical style="width: 100%;">
                                     <n-radio-group v-model:value="secretInputMode" name="githubSecretInputMode">
-                                        <n-radio-button label="Paste" value="paste" />
                                         <n-radio-button label="Upload .pem" value="upload" />
+                                        <n-radio-button label="Paste" value="paste" />
                                     </n-radio-group>
                                     <n-input v-if="secretInputMode === 'paste'" type="textarea" id="org_settings_create_github_integration_secret"
                                         v-model:value="createIntegrationObject.secret" required
+                                        :autosize="{ minRows: 6, maxRows: 18 }"
+                                        style="width: 100%; font-family: monospace; font-size: 12px;"
                                         placeholder="Paste the contents of the .pem file (-----BEGIN RSA PRIVATE KEY----- ...) or DER base64." />
-                                    <n-upload v-else :default-upload="false" :max="1" accept=".pem,.txt,.key" @change="onSecretFileChange">
-                                        <n-button>Choose .pem file</n-button>
+                                    <n-upload v-else :default-upload="false" :max="1" accept=".pem,.txt,.key,application/x-pem-file" :show-file-list="false" @change="onSecretFileChange">
+                                        <n-upload-trigger #="{ handleClick }" abstract>
+                                            <n-button @click="handleClick">Choose .pem file</n-button>
+                                        </n-upload-trigger>
                                     </n-upload>
+                                    <n-text v-if="secretInputMode === 'upload' && uploadedSecretFileName" depth="3" style="font-size: 12px;">
+                                        Loaded: {{ uploadedSecretFileName }} ({{ createIntegrationObject.secret.length }} chars)
+                                    </n-text>
                                 </n-space>
                             </n-form-item>
                             <n-form-item v-if="createIntegrationObject.type === 'GITHUB' || createIntegrationObject.type === 'GITHUB_VALIDATE'" id="org_settings_create_github_integration_appid_group" label="GitHub Application ID"
@@ -1188,7 +1195,7 @@ Spec: https://www.cisa.gov/sites/default/files/2023-04/minimum-requirements-for-
 </template>
   
 <script lang="ts" setup>
-import { NSpace, NIcon, NCheckbox, NCheckboxGroup, NDropdown, NInput, NModal, NCard, NDataTable, NForm, NInputGroup, NButton, NFormItem, NSelect, NRadioGroup, NRadioButton, NTabs, NTabPane, NTooltip, NotificationType, useNotification, NFlex, NH5, NText, NGrid, NGi, DataTableColumns, NDynamicInput, NSwitch, NInputNumber, NAlert, NRadio, NDivider } from 'naive-ui'
+import { NSpace, NIcon, NCheckbox, NCheckboxGroup, NDropdown, NInput, NModal, NCard, NDataTable, NForm, NInputGroup, NButton, NFormItem, NSelect, NRadioGroup, NRadioButton, NTabs, NTabPane, NTooltip, NotificationType, useNotification, NFlex, NH5, NText, NGrid, NGi, DataTableColumns, NDynamicInput, NSwitch, NInputNumber, NAlert, NRadio, NDivider, NUpload, NUploadTrigger } from 'naive-ui'
 import { ComputedRef, h, ref, Ref, computed, onMounted, reactive } from 'vue'
 import type { SelectOption } from 'naive-ui'
 import { useStore } from 'vuex'
@@ -1842,16 +1849,17 @@ const createIntegrationObject: Ref<any> = ref({
     schedule: ''
 })
 
-// Toggles between pasting the GitHub App private key into a textarea
-// and uploading the .pem file GitHub provides directly. Default is
-// 'paste' so the form looks the same as before for keyboard users.
-// Backend normalizes PEM and DER-base64 to the same canonical form.
-const secretInputMode: Ref<'paste' | 'upload'> = ref('paste')
+// Toggles between uploading the GitHub-provided .pem file directly
+// (default) and pasting its contents into a textarea. Backend
+// normalizes PEM and DER-base64 to the same canonical form.
+const secretInputMode: Ref<'paste' | 'upload'> = ref('upload')
+const uploadedSecretFileName: Ref<string> = ref('')
 
 async function onSecretFileChange (options: any) {
     const fileInfo = options.file
     if (fileInfo && fileInfo.file) {
         createIntegrationObject.value.secret = await fileInfo.file.text()
+        uploadedSecretFileName.value = fileInfo.file.name || fileInfo.name || ''
     }
 }
 
@@ -1868,6 +1876,7 @@ function resetCreateIntegrationObject() {
         client: '',
         schedule: ''
     }
+    uploadedSecretFileName.value = ''
 }
 
 
