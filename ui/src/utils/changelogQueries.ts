@@ -88,6 +88,7 @@ const NONE_RELEASE_CHANGES_FRAGMENT = `
     releaseUuid
     version
     lifecycle
+    createdDate
     commits {
         ${CODE_COMMIT_FRAGMENT}
     }

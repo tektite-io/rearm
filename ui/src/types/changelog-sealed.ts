@@ -93,6 +93,7 @@ export interface NoneReleaseChanges {
     releaseUuid: string
     version: string
     lifecycle: string
+    createdDate: string
     commits: CodeCommit[]
     sbomChanges: ReleaseSbomChanges
     findingChanges: ReleaseFindingChanges

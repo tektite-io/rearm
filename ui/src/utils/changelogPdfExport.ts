@@ -50,27 +50,56 @@ function getStatusColor(status: string): string {
 
 // ==================== Code Changes ====================
 
+interface FlatNoneEntry {
+    branchLabel: string
+    release: any
+}
+
+// Flatten NONE-mode branches into a chronological (newest-first) list of {branchLabel, release}.
+// Matches the on-screen flattened render so PDF export stays in sync.
+function flattenNoneReleases(changelog: any): FlatNoneEntry[] {
+    const entries: FlatNoneEntry[] = []
+    for (const branch of (changelog.branches || [])) {
+        const branchLabel = branch.componentName ? `${branch.componentName} / ${branch.branchName || ''}` : (branch.branchName || '')
+        for (const release of (branch.releases || [])) {
+            entries.push({ branchLabel, release })
+        }
+    }
+    // Org-level NONE has an extra components layer.
+    for (const comp of (changelog.components || [])) {
+        for (const branch of (comp.branches || [])) {
+            const branchLabel = `${comp.componentName || ''} / ${branch.branchName || ''}`
+            for (const release of (branch.releases || [])) {
+                entries.push({ branchLabel, release })
+            }
+        }
+    }
+    entries.sort((a, b) => {
+        const aDate = a.release.createdDate ? new Date(a.release.createdDate).getTime() : 0
+        const bDate = b.release.createdDate ? new Date(b.release.createdDate).getTime() : 0
+        return bDate - aDate
+    })
+    return entries
+}
+
 function buildCodeTable(changelog: any, aggregationType: string): { headers: string[]; rows: PdfRow[]; widths: string[] } {
     const headers = ['Branch', 'Release', 'Change Type', 'Commit Message', 'Author']
     const widths = ['auto', 'auto', 'auto', '*', 'auto']
     const rows: PdfRow[] = []
 
     const branches = changelog.branches || []
-    if (!branches.length) return { headers, rows, widths }
+    if (!branches.length && !(changelog.components || []).length) return { headers, rows, widths }
 
     if (aggregationType === 'NONE' && changelog.__typename === 'NoneChangelog') {
-        for (const branch of branches) {
-            const branchLabel = branch.componentName ? `${branch.componentName} / ${branch.branchName || ''}` : (branch.branchName || '')
-            for (const release of (branch.releases || [])) {
-                for (const commit of (release.commits || [])) {
-                    rows.push({ cells: [
-                        { text: branchLabel },
-                        { text: release.version || '' },
-                        { text: commit.changeType || '' },
-                        { text: commit.message || '' },
-                        { text: commit.author || '' }
-                    ]})
-                }
+        for (const { branchLabel, release } of flattenNoneReleases(changelog)) {
+            for (const commit of (release.commits || [])) {
+                rows.push({ cells: [
+                    { text: branchLabel },
+                    { text: release.version || '' },
+                    { text: commit.changeType || '' },
+                    { text: commit.message || '' },
+                    { text: commit.author || '' }
+                ]})
             }
         }
     } else if (aggregationType === 'AGGREGATED' && changelog.__typename === 'AggregatedChangelog') {
@@ -107,62 +136,28 @@ function buildSbomNoneTable(changelog: any): { headers: string[]; rows: PdfRow[]
     const widths = ['auto', 'auto', 'auto', '*', 'auto', 'auto']
     const rows: PdfRow[] = []
 
-    // Component-level: branches > releases > sbomChanges
-    for (const branch of (changelog.branches || [])) {
-        const branchLabel = branch.componentName ? `${branch.componentName} / ${branch.branchName || ''}` : (branch.branchName || '')
-        for (const release of (branch.releases || [])) {
-            const sbom = release.sbomChanges
-            if (!sbom) continue
-            for (const art of (sbom.addedArtifacts || [])) {
-                rows.push({ cells: [
-                    { text: branchLabel },
-                    { text: release.version || '' },
-                    { text: 'Added', color: '#18a058' },
-                    { text: art.purl || '' },
-                    { text: art.name || '' },
-                    { text: art.version || '' }
-                ]})
-            }
-            for (const art of (sbom.removedArtifacts || [])) {
-                rows.push({ cells: [
-                    { text: branchLabel },
-                    { text: release.version || '' },
-                    { text: 'Removed', color: '#d03050' },
-                    { text: art.purl || '' },
-                    { text: art.name || '' },
-                    { text: art.version || '' }
-                ]})
-            }
+    for (const { branchLabel, release } of flattenNoneReleases(changelog)) {
+        const sbom = release.sbomChanges
+        if (!sbom) continue
+        for (const art of (sbom.addedArtifacts || [])) {
+            rows.push({ cells: [
+                { text: branchLabel },
+                { text: release.version || '' },
+                { text: 'Added', color: '#18a058' },
+                { text: art.purl || '' },
+                { text: art.name || '' },
+                { text: art.version || '' }
+            ]})
         }
-    }
-
-    // Org-level NONE: components > branches > releases > sbomChanges
-    for (const comp of (changelog.components || [])) {
-        for (const branch of (comp.branches || [])) {
-            for (const release of (branch.releases || [])) {
-                const sbom = release.sbomChanges
-                if (!sbom) continue
-                for (const art of (sbom.addedArtifacts || [])) {
-                    rows.push({ cells: [
-                        { text: `${comp.componentName || ''} / ${branch.branchName || ''}` },
-                        { text: release.version || '' },
-                        { text: 'Added', color: '#18a058' },
-                        { text: art.purl || '' },
-                        { text: art.name || '' },
-                        { text: art.version || '' }
-                    ]})
-                }
-                for (const art of (sbom.removedArtifacts || [])) {
-                    rows.push({ cells: [
-                        { text: `${comp.componentName || ''} / ${branch.branchName || ''}` },
-                        { text: release.version || '' },
-                        { text: 'Removed', color: '#d03050' },
-                        { text: art.purl || '' },
-                        { text: art.name || '' },
-                        { text: art.version || '' }
-                    ]})
-                }
-            }
+        for (const art of (sbom.removedArtifacts || [])) {
+            rows.push({ cells: [
+                { text: branchLabel },
+                { text: release.version || '' },
+                { text: 'Removed', color: '#d03050' },
+                { text: art.purl || '' },
+                { text: art.name || '' },
+                { text: art.version || '' }
+            ]})
         }
     }
 
@@ -216,25 +211,10 @@ function buildFindingNoneTable(changelog: any): { headers: string[]; rows: PdfRo
     const widths = ['auto', 'auto', 'auto', 'auto', 'auto', '*', 'auto']
     const rows: PdfRow[] = []
 
-    // Component-level
-    for (const branch of (changelog.branches || [])) {
-        const branchLabel = branch.componentName ? `${branch.componentName} / ${branch.branchName || ''}` : (branch.branchName || '')
-        for (const release of (branch.releases || [])) {
-            const fc = release.findingChanges
-            if (!fc) continue
-            addNoneFindingRows(rows, branchLabel, release.version, fc)
-        }
-    }
-
-    // Org-level NONE
-    for (const comp of (changelog.components || [])) {
-        for (const branch of (comp.branches || [])) {
-            for (const release of (branch.releases || [])) {
-                const fc = release.findingChanges
-                if (!fc) continue
-                addNoneFindingRows(rows, `${comp.componentName || ''} / ${branch.branchName || ''}`, release.version, fc)
-            }
-        }
+    for (const { branchLabel, release } of flattenNoneReleases(changelog)) {
+        const fc = release.findingChanges
+        if (!fc) continue
+        addNoneFindingRows(rows, branchLabel, release.version, fc)
     }
 
     return { headers, rows, widths }

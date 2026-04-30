@@ -124,32 +124,24 @@
                     </div>
                 </div>
                 
-                <!-- NONE aggregation: per-release view -->
+                <!-- NONE aggregation: flat chronological view -->
                 <div v-else-if="aggregationType === 'NONE' && changelog.__typename === 'NoneChangelog'">
-                    <div v-for="branch in displayBranches" :key="branch.branchUuid">
-                        <h3 v-if="showBranchHeadings && branch.componentName && branch.componentUuid">
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: branch.componentUuid }}">{{ branch.componentName }}</router-link>
-                            <span> / </span>
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: branch.componentUuid, branchuuid: branch.branchUuid }}">{{ branch.branchName }}</router-link>
-                            <n-tag v-if="branch.changeType === 'ADDED'" type="success" size="small" style="margin-left: 8px;">New Component</n-tag>
-                            <n-tag v-else-if="branch.changeType === 'REMOVED'" type="error" size="small" style="margin-left: 8px;">Component Removed</n-tag>
-                        </h3>
-                        <h3 v-else-if="showBranchHeadings">
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: changelog.componentUuid, branchuuid: branch.branchUuid }}">{{ branch.branchName }}</router-link>
-                            <n-tag v-if="branch.changeType === 'ADDED'" type="success" size="small" style="margin-left: 8px;">New Component</n-tag>
-                            <n-tag v-else-if="branch.changeType === 'REMOVED'" type="error" size="small" style="margin-left: 8px;">Component Removed</n-tag>
-                        </h3>
-                        <div v-for="release in branch.releases" :key="release.releaseUuid">
-                            <ReleaseHeader 
-                                :uuid="release.releaseUuid"
-                                :version="release.version"
-                                :lifecycle="release.lifecycle"
-                            />
-                            <CodeChangesDisplay 
-                                :changes="formatCodeChanges(release)" 
-                                :selected-severity="selectedSeverity"
-                            />
-                        </div>
+                    <div v-for="entry in flattenedReleases" :key="entry.release.releaseUuid">
+                        <ReleaseHeader
+                            :uuid="entry.release.releaseUuid"
+                            :version="entry.release.version"
+                            :lifecycle="entry.release.lifecycle"
+                            :org-uuid="changelog.orgUuid"
+                            :component-uuid="entry.branch.componentUuid || changelog.componentUuid"
+                            :component-name="entry.branch.componentName"
+                            :branch-uuid="entry.branch.branchUuid"
+                            :branch-name="entry.branch.branchName"
+                            :branch-change-type="entry.showBranchTag ? entry.branch.changeType : undefined"
+                        />
+                        <CodeChangesDisplay
+                            :changes="formatCodeChanges(entry.release)"
+                            :selected-severity="selectedSeverity"
+                        />
                     </div>
                 </div>
             </n-tab-pane>
@@ -160,25 +152,20 @@
                     <p v-if="isDateBased" style="font-size: 14px;">Try selecting a different date range or check if there are any releases in this period</p>
                 </div>
                 
-                <!-- NONE mode: Show per-release SBOM changes -->
+                <!-- NONE mode: flat chronological per-release SBOM changes -->
                 <div v-else-if="aggregationType === 'NONE' && changelog.__typename === 'NoneChangelog'">
-                    <div v-for="branch in displayBranches" :key="branch.branchUuid">
-                        <h3 v-if="showBranchHeadings && branch.componentName && branch.componentUuid">
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: branch.componentUuid }}">{{ branch.componentName }}</router-link>
-                            <span> / </span>
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: branch.componentUuid, branchuuid: branch.branchUuid }}">{{ branch.branchName }}</router-link>
-                        </h3>
-                        <h3 v-else-if="showBranchHeadings">
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: changelog.componentUuid, branchuuid: branch.branchUuid }}">{{ branch.branchName }}</router-link>
-                        </h3>
-                        <div v-for="release in branch.releases" :key="release.releaseUuid">
-                            <ReleaseHeader
-                                :uuid="release.releaseUuid"
-                                :version="release.version"
-                                :lifecycle="release.lifecycle"
-                            />
-                            <SbomChangesDisplay :sbom-changes="release.sbomChanges" />
-                        </div>
+                    <div v-for="entry in flattenedReleases" :key="entry.release.releaseUuid">
+                        <ReleaseHeader
+                            :uuid="entry.release.releaseUuid"
+                            :version="entry.release.version"
+                            :lifecycle="entry.release.lifecycle"
+                            :org-uuid="changelog.orgUuid"
+                            :component-uuid="entry.branch.componentUuid || changelog.componentUuid"
+                            :component-name="entry.branch.componentName"
+                            :branch-uuid="entry.branch.branchUuid"
+                            :branch-name="entry.branch.branchName"
+                        />
+                        <SbomChangesDisplay :sbom-changes="entry.release.sbomChanges" />
                     </div>
                 </div>
                 
@@ -194,25 +181,20 @@
                     <FindingChangesDisplayWithAttribution />
                 </div>
                 
-                <!-- NONE mode: Show per-release Finding changes -->
+                <!-- NONE mode: flat chronological per-release Finding changes -->
                 <div v-else-if="aggregationType === 'NONE' && changelog.__typename === 'NoneChangelog'">
-                    <div v-for="branch in displayBranches" :key="branch.branchUuid">
-                        <h3 v-if="showBranchHeadings && branch.componentName && branch.componentUuid">
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: branch.componentUuid }}">{{ branch.componentName }}</router-link>
-                            <span> / </span>
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: branch.componentUuid, branchuuid: branch.branchUuid }}">{{ branch.branchName }}</router-link>
-                        </h3>
-                        <h3 v-else-if="showBranchHeadings">
-                            <router-link :to="{ name: 'ComponentsOfOrg', params: { orguuid: changelog.orgUuid, compuuid: changelog.componentUuid, branchuuid: branch.branchUuid }}">{{ branch.branchName }}</router-link>
-                        </h3>
-                        <div v-for="release in branch.releases" :key="release.releaseUuid">
-                            <ReleaseHeader
-                                :uuid="release.releaseUuid"
-                                :version="release.version"
-                                :lifecycle="release.lifecycle"
-                            />
-                            <FindingChangesDisplay :finding-changes="release.findingChanges" />
-                        </div>
+                    <div v-for="entry in flattenedReleases" :key="entry.release.releaseUuid">
+                        <ReleaseHeader
+                            :uuid="entry.release.releaseUuid"
+                            :version="entry.release.version"
+                            :lifecycle="entry.release.lifecycle"
+                            :org-uuid="changelog.orgUuid"
+                            :component-uuid="entry.branch.componentUuid || changelog.componentUuid"
+                            :component-name="entry.branch.componentName"
+                            :branch-uuid="entry.branch.branchUuid"
+                            :branch-name="entry.branch.branchName"
+                        />
+                        <FindingChangesDisplay :finding-changes="entry.release.findingChanges" />
                     </div>
                 </div>
                 
@@ -327,12 +309,66 @@ const aggregatedDescription = computed(() => {
         : 'Aggregated across all active branches'
 })
 
+// Stable display order for change-type buckets, mirroring AGGREGATED commitsByType.
+const CHANGE_TYPE_ORDER = ['feat', 'fix', 'perf', 'refactor', 'revert', 'build', 'test', 'docs', 'chore', 'ci', 'style']
+
 function formatCodeChanges(release: NoneReleaseChanges): any[] {
-    if (isProduct.value) {
-        return release.commits ? [{ changeType: 'others', commits: release.commits }] : []
+    if (!release.commits || release.commits.length === 0) return []
+    const groups = new Map<string, CodeCommit[]>()
+    for (const commit of release.commits) {
+        const ct = commit.changeType || 'other'
+        const bucket = groups.get(ct)
+        if (bucket) {
+            bucket.push(commit)
+        } else {
+            groups.set(ct, [commit])
+        }
     }
-    return release.commits ? [{ changeType: 'all', commits: release.commits }] : []
+    const ordered: { changeType: string, commits: CodeCommit[] }[] = []
+    for (const ct of CHANGE_TYPE_ORDER) {
+        const commits = groups.get(ct)
+        if (commits) {
+            ordered.push({ changeType: ct, commits })
+            groups.delete(ct)
+        }
+    }
+    // Append any remaining buckets (unknown types, then 'other') in alphabetical order, with 'other' last.
+    const remaining = Array.from(groups.entries()).sort(([a], [b]) => {
+        if (a === 'other') return 1
+        if (b === 'other') return -1
+        return a.localeCompare(b)
+    })
+    for (const [changeType, commits] of remaining) {
+        ordered.push({ changeType, commits })
+    }
+    return ordered
 }
+
+interface FlattenedReleaseEntry {
+    branch: any
+    release: NoneReleaseChanges
+    showBranchTag: boolean
+}
+
+const flattenedReleases = computed<FlattenedReleaseEntry[]>(() => {
+    if (!changelog.value || changelog.value.__typename !== 'NoneChangelog') return []
+    const entries: FlattenedReleaseEntry[] = []
+    const seenBranches = new Set<string>()
+    for (const branch of displayBranches.value) {
+        if (!branch.releases) continue
+        for (const release of branch.releases) {
+            const showBranchTag = !seenBranches.has(branch.branchUuid)
+            seenBranches.add(branch.branchUuid)
+            entries.push({ branch, release, showBranchTag })
+        }
+    }
+    entries.sort((a, b) => {
+        const aDate = a.release.createdDate ? new Date(a.release.createdDate).getTime() : 0
+        const bDate = b.release.createdDate ? new Date(b.release.createdDate).getTime() : 0
+        return bDate - aDate
+    })
+    return entries
+})
 
 const getAggregatedChangelog = async function () {
     try {
