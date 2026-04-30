@@ -25,20 +25,22 @@ const emit = defineEmits<{
     'update:selectedSeverity': [value: string]
 }>()
 
+// Values are raw conventional-commit prefixes emitted by the backend
+// (CommitType.getPrefix), so they match changeType on each commit.
 const severityOptions = [
     { label: 'ALL', value: 'ALL' },
-    { label: 'BREAKING CHANGES', value: 'BREAKING CHANGES' },
-    { label: 'Bug Fixes', value: 'Bug Fixes' },
-    { label: 'Features', value: 'Features' },
-    { label: 'Performance Improvements', value: 'Performance Improvements' },
-    { label: 'Reverts', value: 'Reverts' },
-    { label: 'Code Refactoring', value: 'Code Refactoring' },
-    { label: 'Builds', value: 'Builds' },
-    { label: 'Tests', value: 'Tests' },
-    { label: 'Chores', value: 'Chores' },
-    { label: 'Continuous Integration', value: 'Continuous Integration' },
-    { label: 'Styles', value: 'Styles' },
-    { label: 'Others', value: 'Others' }
+    { label: 'Bug Fixes', value: 'fix' },
+    { label: 'Features', value: 'feat' },
+    { label: 'Performance Improvements', value: 'perf' },
+    { label: 'Reverts', value: 'revert' },
+    { label: 'Code Refactoring', value: 'refactor' },
+    { label: 'Builds', value: 'build' },
+    { label: 'Tests', value: 'test' },
+    { label: 'Documentation', value: 'docs' },
+    { label: 'Chores', value: 'chore' },
+    { label: 'Continuous Integration', value: 'ci' },
+    { label: 'Styles', value: 'style' },
+    { label: 'Others', value: 'other' }
 ]
 
 const handleUpdate = (value: string) => {
