@@ -4660,15 +4660,15 @@ function renderDtrackPill (row: any): any {
     const m = row?.metrics || {}
     if (m.dtrackSubmissionFailed) {
         const reason = m.dtrackSubmissionFailureReason ? `: ${m.dtrackSubmissionFailureReason}` : ''
-        return h(NTag, { type: 'error', size: 'small', round: true, title: `DependencyTrack submission failed${reason}` }, () => 'DTrack failed')
+        return h(NTag, { type: 'error', size: 'small', round: true, title: `DependencyTrack submission failed${reason}` }, () => 'Scan failed')
     }
     if (m.firstScanned) {
-        return h(NTag, { type: 'success', size: 'small', round: true, title: 'Dependency-Track scan complete' }, () => 'DTrack done')
+        return h(NTag, { type: 'success', size: 'small', round: true, title: 'Dependency-Track scan complete' }, () => 'Scan done')
     }
     if (m.dependencyTrackFullUri) {
-        return h(NTag, { type: 'warning', size: 'small', round: true, title: 'Submitted to Dependency-Track, awaiting scan results' }, () => 'DTrack scanning…')
+        return h(NTag, { type: 'warning', size: 'small', round: true, title: 'Submitted to Dependency-Track, awaiting scan results' }, () => 'Scanning…')
     }
-    return h(NTag, { type: 'warning', size: 'small', round: true, title: 'Awaiting Dependency-Track submission' }, () => 'DTrack pending')
+    return h(NTag, { type: 'warning', size: 'small', round: true, title: 'Awaiting Dependency-Track submission' }, () => 'Scan pending')
 }
 
 const artifactsTableFields: DataTableColumns<any> = [
