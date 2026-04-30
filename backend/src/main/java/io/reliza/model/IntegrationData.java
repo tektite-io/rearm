@@ -35,12 +35,18 @@ public class IntegrationData extends RelizaDataParent implements RelizaObject {
 	public enum IntegrationType {
 		DEPENDENCYTRACK,
 		GITHUB,
+		// GITHUB_VALIDATE shares storage shape with GITHUB (App ID in
+		// `schedule`, base64-PKCS8 private key in `secret`) but is wired
+		// to the EXTERNAL_VALIDATION output event type — POSTs check-runs
+		// against /repos/{owner}/{repo}/check-runs to gate PRs based on
+		// ReARM release state, instead of triggering repository_dispatch.
+		GITHUB_VALIDATE,
 		GITLAB,
 		JENKINS,
 		ADO,
 		SLACK,
 		MSTEAMS;
-		
+
 		private IntegrationType () {}
 	}
 	

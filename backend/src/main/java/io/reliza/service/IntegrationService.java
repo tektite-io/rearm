@@ -278,10 +278,14 @@ public class IntegrationService {
 	}
 
 	@Transactional
-	public Integration createIntegration (TriggerIntegrationInputDto tii, WhoUpdated wu) 
+	public Integration createIntegration (TriggerIntegrationInputDto tii, WhoUpdated wu)
 			throws JsonMappingException, JsonProcessingException {
 		Integration i = new Integration();
-		String encryptedSecret = encryptionService.encrypt(tii.getSecret());
+		String secret = tii.getSecret();
+		if (tii.getType() == IntegrationType.GITHUB || tii.getType() == IntegrationType.GITHUB_VALIDATE) {
+			secret = normalizeGithubAppPrivateKey(secret);
+		}
+		String encryptedSecret = encryptionService.encrypt(secret);
 		IntegrationData id = new IntegrationData();
 		id.setOrg(tii.getOrg());
 		id.setIdentifier("TRIGGER_" + UUID.randomUUID().toString());
@@ -1730,9 +1734,67 @@ public class IntegrationService {
 				projectId, wcre.getStatusCode(), wcre.getMessage());
 			return false;
 		} catch (Exception e) {
-			log.error("[DTRACK-CLEANUP] Unexpected error deleting DTrack project {}: {} - {}", 
+			log.error("[DTRACK-CLEANUP] Unexpected error deleting DTrack project {}: {} - {}",
 				projectId, e.getClass().getSimpleName(), e.getMessage());
 			return false;
 		}
+	}
+
+	/** PKCS#8 PrivateKeyInfo middle: AlgorithmIdentifier { rsaEncryption, NULL }. */
+	private static final byte[] PKCS8_RSA_ALG_ID = new byte[] {
+			0x30, 0x0d,
+			0x06, 0x09, 0x2a, (byte) 0x86, 0x48, (byte) 0x86, (byte) 0xf7, 0x0d, 0x01, 0x01, 0x01,
+			0x05, 0x00
+	};
+
+	/**
+	 * Wrap a PKCS#1 RSAPrivateKey DER blob in a PKCS#8 PrivateKeyInfo
+	 * structure. Hardcodes the 2-byte length form, which is correct for
+	 * any RSA key big enough to be usable with GitHub Apps (≥ 1024 bits).
+	 */
+	private static byte[] wrapPkcs1AsPkcs8 (byte[] pkcs1) {
+		int pkcs1Len = pkcs1.length;
+		int seqContentLen = 3
+				+ PKCS8_RSA_ALG_ID.length
+				+ 4
+				+ pkcs1Len;
+		byte[] out = new byte[4 + seqContentLen];
+		int p = 0;
+		out[p++] = 0x30; out[p++] = (byte) 0x82;
+		out[p++] = (byte) ((seqContentLen >> 8) & 0xff);
+		out[p++] = (byte) (seqContentLen & 0xff);
+		out[p++] = 0x02; out[p++] = 0x01; out[p++] = 0x00;
+		System.arraycopy(PKCS8_RSA_ALG_ID, 0, out, p, PKCS8_RSA_ALG_ID.length);
+		p += PKCS8_RSA_ALG_ID.length;
+		out[p++] = 0x04; out[p++] = (byte) 0x82;
+		out[p++] = (byte) ((pkcs1Len >> 8) & 0xff);
+		out[p++] = (byte) (pkcs1Len & 0xff);
+		System.arraycopy(pkcs1, 0, out, p, pkcs1Len);
+		return out;
+	}
+
+	/**
+	 * Normalize a GitHub App private key to canonical PKCS#8 DER base64.
+	 * Accepts: PEM PKCS#1 (-----BEGIN RSA PRIVATE KEY-----) — wrapped to
+	 * PKCS#8; PEM PKCS#8 (-----BEGIN PRIVATE KEY-----) — body re-encoded
+	 * as-is; DER PKCS#8 base64 (no PEM markers) — left as-is so existing
+	 * stored secrets and the legacy "openssl pkcs8 ... | base64" recipe
+	 * keep working. The read side (SaasIntegrationService.getGithubKey)
+	 * always expects PKCS#8 DER base64, so all three inputs converge here.
+	 */
+	static String normalizeGithubAppPrivateKey (String input) {
+		if (StringUtils.isEmpty(input)) return input;
+		String trimmed = input.trim();
+		if (trimmed.startsWith("-----BEGIN ")) {
+			boolean isPkcs1 = trimmed.contains("-----BEGIN RSA PRIVATE KEY-----");
+			String body = trimmed
+					.replaceAll("-----BEGIN [A-Z ]+-----", "")
+					.replaceAll("-----END [A-Z ]+-----", "")
+					.replaceAll("\\s+", "");
+			byte[] der = Base64.getDecoder().decode(body);
+			if (isPkcs1) der = wrapPkcs1AsPkcs8(der);
+			return Base64.getEncoder().encodeToString(der);
+		}
+		return trimmed.replaceAll("\\s+", "");
 	}
 }

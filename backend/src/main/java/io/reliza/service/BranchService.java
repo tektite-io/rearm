@@ -7,6 +7,7 @@ import static io.reliza.common.LambdaExceptionWrappers.handlingConsumerWrapper;
 
 import java.time.ZonedDateTime;
 import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Deque;
 import java.util.HashSet;
@@ -44,6 +45,7 @@ import io.reliza.model.ComponentData;
 import io.reliza.model.ComponentData.ComponentType;
 import io.reliza.model.WhoUpdated;
 import io.reliza.model.dto.BranchDto;
+import io.reliza.model.dto.PullRequestDto;
 import io.reliza.repositories.BranchRepository;
 import io.reliza.versioning.VersionType;
 import lombok.extern.slf4j.Slf4j;
@@ -566,6 +568,24 @@ public class BranchService {
 				throw new RelizaException("Cannot archive base branch");
 			}
 			bd.setStatus(StatusEnum.ARCHIVED);
+			// Treat any still-OPEN PR records on this branch as CLOSED
+			// when the branch itself is archived. This is the close-side
+			// of the no-webhook PR-data flow: syncbranches archives a
+			// branch whose source ref is no longer live in the SCM, and
+			// any PRs left in OPEN state are by definition no longer
+			// open. Without this flip, the branch's persisted
+			// pullRequestData stays OPEN forever — orphan state on an
+			// archived branch.
+			if (null != bd.getPullRequestData() && !bd.getPullRequestData().isEmpty()) {
+				bd.getPullRequestData().forEach((number, pr) -> {
+					if (pr != null && pr.getState() == PullRequestState.OPEN) {
+						pr.setState(PullRequestState.CLOSED);
+						if (pr.getClosedDate() == null) {
+							pr.setClosedDate(ZonedDateTime.now());
+						}
+					}
+				});
+			}
 			Map<String,Object> recordData = Utils.dataToRecord(bd);
 			saveBranch(obr.get(), recordData, wu);
 			archived = true;
@@ -644,6 +664,34 @@ public class BranchService {
 		
 		Map<String,Object> recordData = Utils.dataToRecord(bd);
 		return saveBranch(b, recordData, wu);
+	}
+
+	public BranchData setPRDataOnBranch(PullRequestDto prDto, UUID branchUuid, WhoUpdated wu) throws RelizaException {
+		BranchData bd = getBranchData(branchUuid).orElseThrow(
+			() -> new RelizaException("Branch " + branchUuid + " not found"));
+		var branchPrData = bd.getPullRequestData();
+		if (branchPrData.containsKey(prDto.getNumber())) {
+			var existingPrData = branchPrData.get(prDto.getNumber());
+			var prDtoCommits = prDto.getCommits();
+			if (prDtoCommits != null) {
+				prDtoCommits.addAll(existingPrData.getCommits());
+				prDto.setCommits(prDtoCommits);
+			}
+		}
+
+		var prData = PullRequestData.builder()
+				.state(prDto.getState())
+				.targetBranch(prDto.getTargetBranch())
+				.number(prDto.getNumber())
+				.endpoint(prDto.getEndpoint())
+				.title(prDto.getTitle())
+				.createdDate(prDto.getCreatedDate())
+				.closedDate(prDto.getClosedDate())
+				.mergedDate(prDto.getMergedDate())
+				.commits(prDto.getCommits() != null ? new ArrayList<>(prDto.getCommits()) : new ArrayList<>())
+				.build();
+
+		return setPRDataOnBranch(bd, prData, wu);
 	}
 
 	public BranchData setPRDataOnBranch(BranchData branchData, PullRequestData pullRequestData, WhoUpdated wu) throws RelizaException {

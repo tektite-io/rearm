@@ -72,7 +72,18 @@ public class ComponentData extends RelizaDataParent implements RelizaObject {
 		INTEGRATION_TRIGGER,
 		EMAIL_NOTIFICATION,
 		VDR_SNAPSHOT_ARTIFACT,
-		ADD_APPROVED_ENVIRONMENT;
+		ADD_APPROVED_ENVIRONMENT,
+		// EXTERNAL_VALIDATION fires a check-run-style verdict to an
+		// external SCM. Currently routed to GITHUB_VALIDATE integrations
+		// (POSTs to /repos/{owner}/{repo}/check-runs); the dispatch is
+		// integration-type-aware so additional SCMs can slot in later.
+		// Output event fields used:
+		//   integration  → IntegrationData UUID (must be GITHUB_VALIDATE)
+		//   eventType    → conclusion (SUCCESS / FAILURE / NEUTRAL / SKIPPED / CANCELLED)
+		//   schedule     → installation ID (consistent with GITHUB integration)
+		//   vcs          → VCS repository UUID (resolves to owner/repo)
+		//   clientPayload / celClientPayload → JSON {title, summary, text}
+		EXTERNAL_VALIDATION;
 	}
 	
 	public enum EventScope {

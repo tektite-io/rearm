@@ -4,6 +4,7 @@
 package io.reliza.ws;
 
 import java.util.Arrays;
+import java.util.Comparator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -36,6 +37,7 @@ import io.reliza.exceptions.RelizaException;
 import io.reliza.model.Branch;
 import io.reliza.model.BranchData;
 import io.reliza.model.BranchData.ChildComponent;
+import io.reliza.model.BranchData.PullRequestData;
 import io.reliza.model.ComponentData;
 import io.reliza.model.VersionAssignment.VersionTypeEnum;
 import io.reliza.model.ReleaseData;
@@ -400,7 +402,18 @@ public class BranchDataFetcher {
 		}
 		return result;
 	}
-	
+
+	@DgsData(parentType = "Branch", field = "pullRequests")
+	public List<PullRequestData> pullRequestsOfBranch(DgsDataFetchingEnvironment dfe) {
+		BranchData bd = dfe.getSource();
+		if (bd.getPullRequestData() == null || bd.getPullRequestData().isEmpty()) {
+			return List.of();
+		}
+		return bd.getPullRequestData().values().stream()
+				.sorted(Comparator.comparing(PullRequestData::getNumber, Comparator.reverseOrder()))
+				.toList();
+	}
+
 	/**
 	 * Return all feature sets that include the given component (product or component)
 	 * as an auto-integrate dependency of any requirement type (REQUIRED, OPTIONAL, IGNORED),

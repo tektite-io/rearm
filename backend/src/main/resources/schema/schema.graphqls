@@ -2113,6 +2113,12 @@ input GetNewVersionInput {
 	createComponentName: String
 	createComponentVersionSchema: String
 	createComponentFeatureBranchVersionSchema: String
+	"""
+	Optional PR metadata bundled with the call. When supplied, the source
+	branch's pullRequestData is updated with this PR's state — same path
+	the existing setPRDataOnBranch logic uses. No GitHub webhook required.
+	"""
+	pullRequest: PullRequestInfoInput
 }
 
 input ReleaseInputProg {
@@ -2143,6 +2149,38 @@ input ReleaseInputProg {
 	"""
 	perspective: ID
 	rebuildRelease: Boolean
+	"""
+	Optional PR metadata bundled with the call. When supplied, the source
+	branch's pullRequestData is updated with this PR's state — same path
+	the existing setPRDataOnBranch logic uses. No GitHub webhook required.
+	"""
+	pullRequest: PullRequestInfoInput
+}
+
+"""
+PR metadata supplied by CI alongside a release/version creation. The
+caller (rearm-actions or any CI integration) populates these fields
+from the SCM event context. The server resolves targetBranch by name
+on the same component as the release's branch.
+"""
+input PullRequestInfoInput {
+	number: Int!
+	"""
+	"OPEN" or "CLOSED". Case-insensitive — converted to PullRequestState
+	server-side.
+	"""
+	state: String!
+	title: String
+	"""
+	Target branch name (e.g., "main"). Server resolves to a Branch UUID
+	on the same component if the named branch exists; otherwise stored
+	as null.
+	"""
+	targetBranch: String
+	"""
+	Link back to the PR in the upstream SCM (e.g., GitHub PR URL).
+	"""
+	endpoint: String
 }
 
 input AddArtifactInput {
@@ -2394,6 +2432,7 @@ enum EventType {
 	EMAIL_NOTIFICATION
 	VDR_SNAPSHOT_ARTIFACT
 	ADD_APPROVED_ENVIRONMENT
+	EXTERNAL_VALIDATION
 }
 
 enum EventScope {
@@ -2735,6 +2774,7 @@ enum ApprovalMappingClass {
 
 enum IntegrationType {
 	GITHUB
+	GITHUB_VALIDATE
 	GITLAB
 	JENKINS
 	ADO

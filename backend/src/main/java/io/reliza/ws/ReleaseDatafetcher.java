@@ -199,7 +199,7 @@ public class ReleaseDatafetcher {
 
 	@Autowired
 	private DownloadLogService downloadLogService;
-	
+
 	@PreAuthorize("isAuthenticated()")
 	@DgsData(parentType = "Query", field = "release")
 	public ReleaseData getRelease(
@@ -799,10 +799,58 @@ public class ReleaseDatafetcher {
 		if (ob.isEmpty() || !obd.get().getComponent().equals(componentId)) {
 			throw new RelizaException("Submitted branch or feature set is invalid for this component");
 		}
-		
-		return BranchData.branchDataFromDbRecord(ob.get()); 
+
+		return BranchData.branchDataFromDbRecord(ob.get());
 	}
-	
+
+	/**
+	 * Parse an optional {@code pullRequest} field on a programmatic
+	 * release / version-bump call and apply it via the existing
+	 * {@code setPRDataOnBranch} path so the source branch's
+	 * {@code pullRequestData} stays in sync with the upstream SCM.
+	 * Tolerant of missing/malformed input — logs a warning and
+	 * returns. The {@code targetBranch} string in the input is
+	 * resolved to a Branch UUID on the same component as {@code bd};
+	 * if not found, stored as {@code null}.
+	 */
+	private void applyPullRequestInputIfPresent (Map<String, Object> inputMap, BranchData bd, WhoUpdated wu) {
+		if (bd == null) return;
+		@SuppressWarnings("unchecked")
+		Map<String, Object> prInput = (Map<String, Object>) inputMap.get("pullRequest");
+		if (prInput == null || prInput.get("number") == null) return;
+		try {
+			Integer prNumber = ((Number) prInput.get("number")).intValue();
+			String stateStr = (String) prInput.get("state");
+			if (StringUtils.isEmpty(stateStr)) {
+				log.warn("pullRequest input on branch {} missing required 'state' — skipping", bd.getUuid());
+				return;
+			}
+			io.reliza.common.CommonVariables.PullRequestState prState =
+					io.reliza.common.CommonVariables.PullRequestState.valueOf(StringUtils.upperCase(stateStr));
+			UUID targetBranchUuid = null;
+			String targetBranchName = (String) prInput.get("targetBranch");
+			if (StringUtils.isNotEmpty(targetBranchName)) {
+				targetBranchUuid = branchService.findBranchByComponentAndName(bd.getComponent(), targetBranchName)
+						.map(BranchData::getUuid).orElse(null);
+			}
+			URI prEndpoint = null;
+			String endpointStr = (String) prInput.get("endpoint");
+			if (StringUtils.isNotEmpty(endpointStr)) {
+				try { prEndpoint = URI.create(endpointStr); } catch (Exception ignored) {}
+			}
+			io.reliza.model.dto.PullRequestDto prDto = io.reliza.model.dto.PullRequestDto.builder()
+					.number(prNumber)
+					.state(prState)
+					.title((String) prInput.get("title"))
+					.targetBranch(targetBranchUuid)
+					.endpoint(prEndpoint)
+					.build();
+			branchService.setPRDataOnBranch(prDto, bd.getUuid(), wu);
+		} catch (Exception e) {
+			log.warn("Failed to apply pullRequest input on branch {}: {}", bd.getUuid(), e.getMessage());
+		}
+	}
+
 
 	@DgsData(parentType = "Mutation", field = "addReleaseProgrammatic")
 	@Transactional
@@ -920,7 +968,15 @@ public class ReleaseDatafetcher {
 		
 		BranchData bd = resolveAddReleaseProgrammaticBranchData(componentId, (String) progReleaseInput.get(CommonVariables.BRANCH_FIELD),
 				ar.getWhoUpdated());
-		
+
+		// Optional PR-data attachment: keeps the source branch's
+		// pullRequestData in sync with the upstream SCM without a
+		// dedicated webhook channel. Routed through the existing
+		// setPRDataOnBranch path so the auto-clone / autoIntegrate-on-
+		// close behaviour applies the same way as the ADO webhook
+		// would have applied it.
+		applyPullRequestInputIfPresent(progReleaseInput, bd, ar.getWhoUpdated());
+
 		@SuppressWarnings("unchecked")
 		var inboundDeliverablesList = (List<Map<String,Object>>) progReleaseInput.get("inboundDeliverables");
 		Utils.addReleaseProgrammaticValidateDeliverables(inboundDeliverablesList, bd);

@@ -300,9 +300,63 @@ public class ComponentDataFetcher {
 		}
 
 		GetNewVersionDto getNewVersionDto = new GetNewVersionDto(componentId, branchStr, modifier, action, metadata, setVersionPin, lifecycleResolved, onlyVersionFlag, sourceCodeEntry, commits, VersionTypeEnum.DEV);
-		
-		return releaseVersionService.getNewVersionWrapper(getNewVersionDto, ar.getWhoUpdated());
 
+		VersionResponse vr = releaseVersionService.getNewVersionWrapper(getNewVersionDto, ar.getWhoUpdated());
+
+		// Optional PR-data attachment: keeps the source branch's
+		// pullRequestData in sync with the upstream SCM. The branch is
+		// resolved/auto-created during getNewVersionWrapper above, so by
+		// now lookup-by-name on this component returns the persisted
+		// branch — apply PR state through the same setPRDataOnBranch
+		// path that an inbound webhook would use.
+		applyPullRequestInputIfPresent(getNewVersionInput, componentId, branchStr, ar.getWhoUpdated());
+
+		return vr;
+	}
+
+	private void applyPullRequestInputIfPresent (Map<String, Object> inputMap, UUID componentId,
+			String branchStr, WhoUpdated wu) {
+		if (componentId == null || StringUtils.isEmpty(branchStr)) return;
+		@SuppressWarnings("unchecked")
+		Map<String, Object> prInput = (Map<String, Object>) inputMap.get("pullRequest");
+		if (prInput == null || prInput.get("number") == null) return;
+		Optional<BranchData> obd = branchService.findBranchByComponentAndName(componentId, branchStr);
+		if (obd.isEmpty()) {
+			log.warn("pullRequest input supplied but branch '{}' not found on component {}; skipping",
+					branchStr, componentId);
+			return;
+		}
+		try {
+			Integer prNumber = ((Number) prInput.get("number")).intValue();
+			String stateStr = (String) prInput.get("state");
+			if (StringUtils.isEmpty(stateStr)) {
+				log.warn("pullRequest input on branch {} missing required 'state' — skipping", obd.get().getUuid());
+				return;
+			}
+			io.reliza.common.CommonVariables.PullRequestState prState =
+					io.reliza.common.CommonVariables.PullRequestState.valueOf(StringUtils.upperCase(stateStr));
+			UUID targetBranchUuid = null;
+			String targetBranchName = (String) prInput.get("targetBranch");
+			if (StringUtils.isNotEmpty(targetBranchName)) {
+				targetBranchUuid = branchService.findBranchByComponentAndName(componentId, targetBranchName)
+						.map(BranchData::getUuid).orElse(null);
+			}
+			java.net.URI prEndpoint = null;
+			String endpointStr = (String) prInput.get("endpoint");
+			if (StringUtils.isNotEmpty(endpointStr)) {
+				try { prEndpoint = java.net.URI.create(endpointStr); } catch (Exception ignored) {}
+			}
+			io.reliza.model.dto.PullRequestDto prDto = io.reliza.model.dto.PullRequestDto.builder()
+					.number(prNumber)
+					.state(prState)
+					.title((String) prInput.get("title"))
+					.targetBranch(targetBranchUuid)
+					.endpoint(prEndpoint)
+					.build();
+			branchService.setPRDataOnBranch(prDto, obd.get().getUuid(), wu);
+		} catch (Exception e) {
+			log.warn("Failed to apply pullRequest input on branch {}: {}", obd.get().getUuid(), e.getMessage());
+		}
 	}
 	
 	@DgsData(parentType = "Mutation", field = "createComponentProgrammatic")

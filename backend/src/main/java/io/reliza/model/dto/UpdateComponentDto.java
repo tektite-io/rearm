@@ -139,7 +139,8 @@ public class UpdateComponentDto {
 									.eventType(roei.getEventType())
 									.toReleaseLifecycle(roei.getToReleaseLifecycle())
 									.includeSuppressed(roei.getIncludeSuppressed());
-		if (it == IntegrationType.GITHUB || it == IntegrationType.ADO) {
+		if (it == IntegrationType.GITHUB || it == IntegrationType.ADO
+				|| it == IntegrationType.GITHUB_VALIDATE) {
 			if (StringUtils.isNotEmpty(roei.getClientPayload())) {
 				builder.clientPayload(roei.getClientPayload());
 			}
