@@ -1146,6 +1146,7 @@ const COMPONENT_SHORT_DATA = `
         idType
         idValue
     }
+    effectiveLifecycle
 `
 
 const MARKETING_RELEASE_GQL_DATA = `
