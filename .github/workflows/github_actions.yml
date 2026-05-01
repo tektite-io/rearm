@@ -8,7 +8,40 @@ on:
 name: Build Component Container Images And Submit Metadata To Reliza Hub
 
 jobs:
+  detect:
+    name: Detect changed components
+    runs-on: ubuntu-latest
+    outputs:
+      docs:          ${{ steps.f.outputs.docs }}
+      ui:            ${{ steps.f.outputs.ui }}
+      backend:       ${{ steps.f.outputs.backend }}
+      oci:           ${{ steps.f.outputs.oci }}
+      keycloak:      ${{ steps.f.outputs.keycloak }}
+      landing:       ${{ steps.f.outputs.landing }}
+      rebom:         ${{ steps.f.outputs.rebom }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - id: f
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d # v4.0.1
+        with:
+          filters: |
+            docs:
+              - 'documentation_site/**'
+            ui:
+              - 'ui/**'
+            backend:
+              - 'backend/**'
+            oci:
+              - 'oci-artifact-service/**'
+            keycloak:
+              - 'keycloak/**'
+            landing:
+              - 'landing_site/**'
+            rebom:
+              - 'rebom-backend/**'
   build-docs:
+    needs: detect
+    if: needs.detect.outputs.docs == 'true' || github.ref == 'refs/heads/main'
     permissions:
       id-token: write
     name: Build And Push Documentation Site
@@ -30,6 +63,7 @@ jobs:
           source_code_sbom_type: 'npm'
           enable_public_cosign_sigstore: 'true'
   build-docs-helm:
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
       id-token: write
@@ -51,6 +85,7 @@ jobs:
           enable_public_cosign_sigstore: true
           limit_to_branches: main
   build-landing-helm:
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
       id-token: write
@@ -72,6 +107,7 @@ jobs:
           enable_public_cosign_sigstore: true
           limit_to_branches: main
   build-rearm-helm:
+    if: github.ref == 'refs/heads/main'
     permissions:
       contents: write
       id-token: write
@@ -97,6 +133,8 @@ jobs:
           rearm_mirror_api_url: https://demo.rearmhq.com
           limit_to_branches: main
   build-ui:
+    needs: detect
+    if: needs.detect.outputs.ui == 'true' || github.ref == 'refs/heads/main'
     permissions:
       id-token: write
     name: Build And Push ReARM UI
@@ -124,6 +162,8 @@ jobs:
           rearm_mirror_api_key: ${{ secrets.REARM_REARM_UI_API_KEY }}
           rearm_mirror_api_url: https://demo.rearmhq.com
   build-backend:
+    needs: detect
+    if: needs.detect.outputs.backend == 'true' || github.ref == 'refs/heads/main'
     permissions:
       id-token: write
     name: Build And Push ReARM Backend
@@ -151,6 +191,8 @@ jobs:
           rearm_mirror_api_key: ${{ secrets.REARM_REARM_BACKEND_API_KEY }}
           rearm_mirror_api_url: https://demo.rearmhq.com
   build-oci-service:
+    needs: detect
+    if: needs.detect.outputs.oci == 'true' || github.ref == 'refs/heads/main'
     permissions:
       id-token: write
     name: Build And Push ReARM OCI Service
@@ -178,6 +220,8 @@ jobs:
           rearm_mirror_api_key: ${{ secrets.REARM_REARM_OCI_ARTIFACT_API_KEY }}
           rearm_mirror_api_url: https://demo.rearmhq.com
   build-keycloak:
+    needs: detect
+    if: needs.detect.outputs.keycloak == 'true' || github.ref == 'refs/heads/main'
     permissions:
       id-token: write
     name: Build And Push ReARM Keycloak
@@ -203,6 +247,8 @@ jobs:
           rearm_mirror_api_key: ${{ secrets.REARM_REARM_KEYCLOAK_API_KEY }}
           rearm_mirror_api_url: https://demo.rearmhq.com
   build-rearm-landing:
+    needs: detect
+    if: needs.detect.outputs.landing == 'true' || github.ref == 'refs/heads/main'
     permissions:
       id-token: write
     name: Build And Push ReARM Landing Website rearmhq.com
@@ -226,6 +272,8 @@ jobs:
           enable_codeql: 'true'
           codeql_language: 'javascript'
   build-rebom-backend:
+    needs: detect
+    if: needs.detect.outputs.rebom == 'true' || github.ref == 'refs/heads/main'
     permissions:
       id-token: write
     name: Build And Push Rebom Backend
