@@ -8,12 +8,21 @@ import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
+import org.springframework.data.jpa.repository.Lock;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.CrudRepository;
+import org.springframework.transaction.annotation.Transactional;
 
 import io.reliza.model.SourceCodeEntry;
+import jakarta.persistence.LockModeType;
 
 public interface SourceCodeEntryRepository extends CrudRepository<SourceCodeEntry, UUID> {
+
+	@Transactional
+	@Lock(LockModeType.PESSIMISTIC_WRITE)
+	@Query(value = "SELECT s FROM SourceCodeEntry s where uuid = :uuid")
+	Optional<SourceCodeEntry> findByIdWriteLocked(UUID uuid);
+
 	@Query(
 			value = VariableQueries.FIND_SCE_BY_COMMIT_AND_VCS,
 			nativeQuery = true)

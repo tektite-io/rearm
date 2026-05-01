@@ -152,7 +152,14 @@ public class SourceCodeEntryService {
 						sceDto.getCommit(), sceDto.getVcs(), osce.get().getUuid());
 			}
 		}
-		var sce = osce.get();
+		// Take a row-level write lock on the existing SCE before reading its
+		// current artifacts. Concurrent monorepo addRelease calls land on the
+		// same SCE and would otherwise both compute audit revision N+1 from a
+		// stale revision N read, then collide on audit_revision_unique. The
+		// lock serializes the merge → save → audit-write critical section
+		// without affecting the create-side race (which is still handled by
+		// the REQUIRES_NEW + DataIntegrityViolation catch path above).
+		var sce = repository.findByIdWriteLocked(osce.get().getUuid()).orElseThrow();
 		log.debug("Existing sce found, updating ...: {}", sce);
 		SourceCodeEntryData existingSceData = SourceCodeEntryData.dataFromRecord(sce);
 		SourceCodeEntryData sced = SourceCodeEntryData.scEntryDataFactory(sceDto);

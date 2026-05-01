@@ -47,7 +47,11 @@ public class VariantService {
 	@Lazy
 	@Autowired
 	private AcollectionService acollectionService;
-			
+
+	@Lazy
+	@Autowired
+	private SbomComponentService sbomComponentService;
+
 	private final VariantRepository repository;
 	
 	VariantService(VariantRepository repository) {
@@ -127,10 +131,18 @@ public class VariantService {
 			added = true;
 			// Resolve acollection to capture artifacts from newly attached deliverables
 			acollectionService.resolveReleaseCollection(vd.getRelease(), wu);
+			// Outbound-deliverable BOMs feed the release's SBOM-component
+			// inventory through collectBomArtifactUuids, so the every-minute
+			// scheduler must re-aggregate after the variant's deliverable set
+			// changes. Idempotent — markSbomReconcileRequested no-ops if a
+			// request is already pending.
+			if (vd.getRelease() != null) {
+				sbomComponentService.requestReconcile(vd.getRelease());
+			}
 		}
 		return added;
 	}
-	
+
 	@Transactional
 	public void clearOutboundDeliverables(UUID variantUuid, WhoUpdated wu) {
 		Optional<Variant> vOpt = getVariant(variantUuid);

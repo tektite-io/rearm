@@ -941,9 +941,20 @@ public class ReleaseService {
 				if(addedOnComplete)
 					continue;
 				Component c = new Component();
-				c.setName(dd.getDisplayIdentifier());
-				c.setGroup(rd.namespace() + "---" + rd.productName());
 				Component.Type cycloneComponentType = CdxType.toCycloneDxType(dd.getType());
+				// CycloneDX models container identity as (name, version) +
+				// optional pURL/digest. Multiple ingestion paths leave the
+				// deliverable's displayIdentifier with `:tag` (and sometimes
+				// `@digest`) baked in; left alone, the emitter then writes
+				// `image:tag` as `name` while also setting `version` →
+				// downstream consumers see `image:tag:tag`-style duplication.
+				// Normalise on the way out so the emitted CycloneDX is
+				// canonical regardless of how the deliverable was created.
+				String emittedName = (cycloneComponentType == Component.Type.CONTAINER)
+						? Utils.stripContainerTagAndDigest(dd.getDisplayIdentifier())
+						: dd.getDisplayIdentifier();
+				c.setName(emittedName);
+				c.setGroup(rd.namespace() + "---" + rd.productName());
 				c.setType(cycloneComponentType);
 				
 				

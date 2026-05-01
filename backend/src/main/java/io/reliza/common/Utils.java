@@ -397,9 +397,44 @@ public class Utils {
 	 * @return
 	 */
 	public static String dockerTagSafeVersion (String baseVersion) {
-		// TODO: if there are new details in https://github.com/moby/moby/issues/16304, 
+		// TODO: if there are new details in https://github.com/moby/moby/issues/16304,
 		// https://github.com/opencontainers/distribution-spec/issues/154, this may be reviewed
 		return baseVersion.replaceAll("[^[\\w][\\w.-]{0,127}]", "_");
+	}
+
+	/**
+	 * Strip any trailing {@code :tag} and {@code @digest} from a container
+	 * image identifier. Used when emitting CycloneDX container components
+	 * so a deliverable whose stored {@code displayIdentifier} happens to
+	 * already include {@code :tag} (multiple ingestion paths into ReARM
+	 * leave it that way) doesn't end up doubled when the BOM emitter
+	 * sets {@code component.version} separately.
+	 *
+	 * <p>Conservative against hostnames that include a port — colon search
+	 * starts after the last forward-slash, so e.g.
+	 * {@code registry.example.com:5000/foo:1.0} trims to
+	 * {@code registry.example.com:5000/foo} (port preserved). Idempotent —
+	 * applying twice produces the same result.
+	 *
+	 * @param imageName raw container display identifier
+	 * @return identifier with trailing tag/digest stripped, or the input
+	 *         unchanged if neither is present (or if {@code imageName} is
+	 *         null/empty)
+	 */
+	public static String stripContainerTagAndDigest(String imageName) {
+		if (imageName == null || imageName.isEmpty()) return imageName;
+		String result = imageName;
+		int lastSlash = result.lastIndexOf('/');
+		int searchFrom = Math.max(lastSlash, 0);
+		int atIdx = result.indexOf('@', searchFrom);
+		if (atIdx >= 0) {
+			result = result.substring(0, atIdx);
+		}
+		int colonIdx = result.indexOf(':', searchFrom);
+		if (colonIdx >= 0) {
+			result = result.substring(0, colonIdx);
+		}
+		return result;
 	}
 	
 	public static String cleanBranch(String branch) {

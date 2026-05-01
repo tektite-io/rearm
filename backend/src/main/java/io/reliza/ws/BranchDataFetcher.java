@@ -53,6 +53,7 @@ import io.reliza.model.dto.BranchDto;
 import io.reliza.model.dto.ProgrammaticAuthContext;
 import io.reliza.model.dto.AuthorizationResponse.InitType;
 import io.reliza.service.AuthorizationService;
+import io.reliza.service.AuthorizationService.FreeformKeyVerification;
 import io.reliza.service.BranchService;
 import io.reliza.service.ComponentService;
 import io.reliza.service.DependencyPatternService;
@@ -305,12 +306,26 @@ public class BranchDataFetcher {
 		Map<String, Object> synchronizeBranchInput = dfe.getArgument("synchronizeBranchInput");
 
 		UUID componentId = componentService.resolveComponentIdFromInput(synchronizeBranchInput, authCtx);
-		
+
 		List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT, ApiTypeEnum.ORGANIZATION_RW);
 		Optional<ComponentData> ocd = getComponentService.getComponentData(componentId);
 		RelizaObject ro = ocd.isPresent() ? ocd.get() : null;
 		AuthorizationResponse ar = AuthorizationResponse.initialize(InitType.FORBID);
-		if (null != ro)	ar = authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, ro.getOrg(), CallType.WRITE, ro);
+		if (null != ro) {
+			// Accept the historic key types (COMPONENT, ORGANIZATION_RW), or a FREEFORM
+			// key whose permissions cover this component. Required for CI flows that
+			// drive the action with an org-wide FREEFORM key (init step calls syncbranches
+			// right after getversion creates the component).
+			if (ahp.getType() == ApiTypeEnum.FREEFORM) {
+				FreeformKeyVerification fkv = authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+						ahp, PermissionFunction.RESOURCE, PermissionScope.COMPONENT, ro.getUuid(),
+						List.of(ro), CallType.WRITE);
+				ar = AuthorizationResponse.initialize(InitType.ALLOW);
+				ar.setWhoUpdated(fkv.whoUpdated());
+			} else {
+				ar = authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, ro.getOrg(), CallType.WRITE, ro);
+			}
+		}
 		
 		@SuppressWarnings("unchecked")
 		List<String> liveBranches = (List<String>) synchronizeBranchInput.get("liveBranches");

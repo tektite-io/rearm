@@ -2115,6 +2115,13 @@ input GetNewVersionInput {
 	createComponentVersionSchema: String
 	createComponentFeatureBranchVersionSchema: String
 	"""
+	Optional perspective UUID. When supplied with createComponentIfMissing
+	and the component does not yet exist, the new component is created and
+	assigned to this perspective; authorization with a FREEFORM key requires
+	WRITE on the perspective. Ignored when the component already exists.
+	"""
+	perspective: ID
+	"""
 	Optional PR metadata bundled with the call. When supplied, the source
 	branch's pullRequestData is updated with this PR's state — same path
 	the existing setPRDataOnBranch logic uses. No GitHub webhook required.

@@ -15,8 +15,10 @@ import org.springframework.transaction.annotation.Transactional;
 
 import io.reliza.model.AnalysisScope;
 import io.reliza.model.ArtifactData;
+import io.reliza.model.ArtifactData.ArtifactType;
 import io.reliza.model.Release;
 import io.reliza.model.ReleaseData;
+import io.reliza.model.ReleaseData.ReleaseLifecycle;
 import io.reliza.model.dto.ReleaseMetricsDto;
 import io.reliza.repositories.ReleaseRepository;
 
@@ -28,9 +30,6 @@ import io.reliza.repositories.ReleaseRepository;
 public class ReleaseMetricsComputeService {
 
 	private static final Logger log = LoggerFactory.getLogger(ReleaseMetricsComputeService.class);
-
-	// Fallback offset from artifact creation date to estimate first scan time when no actual firstScanned is recorded
-	private static final long FIRST_SCAN_FALLBACK_HOURS = 6;
 
 	@Autowired
 	private ReleaseRepository repository;
@@ -68,29 +67,35 @@ public class ReleaseMetricsComputeService {
 			ReleaseMetricsDto rmd = new ReleaseMetricsDto();
 			var allReleaseArts = artifactGatherService.gatherReleaseArtifacts(rd);
 			final ZonedDateTime[] releaseFirstScanned = { null };
+			final boolean[] hasAnyBomArtifact = { false };
 			allReleaseArts.forEach(aid -> {
 				var ad = artifactService.getArtifactData(aid);
 				if (ad.isPresent()) {
 					ArtifactData artifactData = ad.get();
+					if (artifactData.getType() == ArtifactType.BOM) {
+						hasAnyBomArtifact[0] = true;
+					}
 					ReleaseMetricsDto artifactMetrics = artifactData.getMetrics();
 					if (artifactMetrics != null) {
 						// Set attributedAt to artifact creation date for findings that don't have it
 						artifactMetrics.setAttributedAtFallback(artifactData.getCreatedDate());
 						rmd.mergeWithByContent(artifactMetrics);
 					}
-					// Compute release firstScanned as max of all artifact firstScanned values.
-					// Only apply fallback for artifacts that have metrics (i.e. were DTrack-submitted),
-					// to avoid setting firstScanned for releases where no actual scanning has occurred.
+					// Compute release firstScanned as max of artifact firstScanned values.
+					// Only the real artifact-level firstScanned counts — set by the
+					// scan-data ingestion path (SharedArtifactService) when the
+					// scanner actually returns findings. No createdDate-based
+					// fallback: synthesizing a firstScanned for an artifact that
+					// has been submitted but not yet scanned would surface stale
+					// "ready" circles in the UI before the initial scan completes.
 					ZonedDateTime artFs = (artifactData.getMetrics() != null) ? artifactData.getMetrics().getFirstScanned() : null;
-					if (artFs == null && artifactData.getMetrics() != null && artifactData.getCreatedDate() != null) {
-						artFs = artifactData.getCreatedDate().plusHours(FIRST_SCAN_FALLBACK_HOURS);
-					}
 					if (artFs != null && (releaseFirstScanned[0] == null || artFs.isAfter(releaseFirstScanned[0]))) {
 						releaseFirstScanned[0] = artFs;
 					}
 				}
 			});
-			rmd.mergeWithByContent(rollUpProductReleaseMetrics(rd));
+			ReleaseMetricsDto rolledUp = rollUpProductReleaseMetrics(rd);
+			rmd.mergeWithByContent(rolledUp);
 			vulnAnalysisService.processReleaseMetricsDto(rd.getOrg(), r.getUuid(), AnalysisScope.RELEASE, rmd);
 			if (null == lastScanned) lastScanned = ZonedDateTime.now();
 			rmd.setLastScanned(lastScanned);
@@ -101,6 +106,38 @@ public class ReleaseMetricsComputeService {
 				if (rmd.getFirstScanned() == null || releaseFirstScanned[0].isAfter(rmd.getFirstScanned())) {
 					rmd.setFirstScanned(releaseFirstScanned[0]);
 				}
+			}
+			// All-or-nothing: if any known child release lacks firstScanned, the product
+			// release's firstScanned must remain null. rollUpProductReleaseMetrics signals
+			// this by returning a metrics DTO with firstScanned=null when at least one
+			// child is unscanned. Override here because mergeWithByContent above can't
+			// distinguish "child rollup says null" from "no child contribution at all".
+			boolean hasChildren = rd.getParentReleases() != null && !rd.getParentReleases().isEmpty();
+			boolean childrenIncomplete = hasChildren && rolledUp.getFirstScanned() == null;
+			if (childrenIncomplete) {
+				rmd.setFirstScanned(null);
+			}
+			// No-BOM anchor: a release that has reached a scannable lifecycle
+			// (ASSEMBLED or beyond) but has no BOM artifacts attached anywhere
+			// (release-direct, SCE, or outbound deliverables) is trivially
+			// "scan complete" — there is nothing for DTrack to scan.
+			// Without this, releases with no scannable inputs would surface
+			// "Scan pending" indefinitely, and product releases that depend
+			// on them could never aggregate firstScanned under the
+			// all-or-nothing rollup contract.
+			//
+			// Anchor to the release createdDate so the value is deterministic
+			// (idempotent across rescans) and chronologically sane vs. any
+			// real children's firstScanned that get max'd with it upstream.
+			//
+			// Skipped when childrenIncomplete is true so we don't override
+			// an unscanned-child signal with a synthetic anchor.
+			if (rmd.getFirstScanned() == null
+					&& !childrenIncomplete
+					&& !hasAnyBomArtifact[0]
+					&& isScannableLifecycle(rd.getLifecycle())
+					&& rd.getCreatedDate() != null) {
+				rmd.setFirstScanned(rd.getCreatedDate());
 			}
 			rd.setMetrics(rmd);
 			if (!rmd.equals(originalMetrics)) {
@@ -138,16 +175,51 @@ public class ReleaseMetricsComputeService {
 		return false;
 	}
 
+	/**
+	 * "Scannable lifecycle" = the release has reached a stage at which we
+	 * expect scanning to have completed (or to be unnecessary). PENDING /
+	 * DRAFT releases are still being assembled; CANCELLED / REJECTED
+	 * releases never assemble. Anything ASSEMBLED-or-later is fair game
+	 * for the no-BOM firstScanned anchor.
+	 */
+	private static boolean isScannableLifecycle(ReleaseLifecycle lc) {
+		if (lc == null) return false;
+		return lc.ordinal() >= ReleaseLifecycle.ASSEMBLED.ordinal();
+	}
+
 	private ReleaseMetricsDto rollUpProductReleaseMetrics(ReleaseData rd) {
 		ReleaseMetricsDto rmd = new ReleaseMetricsDto();
-		rd.getParentReleases().forEach(r -> {
+		var parents = rd.getParentReleases();
+		if (parents == null || parents.isEmpty()) {
+			return rmd;
+		}
+		// Track all-or-nothing for children's firstScanned: a product release's
+		// "initial scan complete" signal should only fire once every known child
+		// release has been scanned. If any child lacks firstScanned, the product's
+		// firstScanned must stay null.
+		final boolean[] allChildrenScanned = { true };
+		final ZonedDateTime[] maxChildFirstScanned = { null };
+		parents.forEach(r -> {
 			ReleaseData parentRd = sharedReleaseService
 					.getReleaseData(r.getRelease(), rd.getOrg()).get();
 			ReleaseMetricsDto parentReleaseMetrics = parentRd.getMetrics();
+			if (parentReleaseMetrics == null) {
+				allChildrenScanned[0] = false;
+				return;
+			}
 			parentReleaseMetrics.enrichSourcesWithRelease(r.getRelease());
 			rmd.mergeWithByContent(parentReleaseMetrics);
 			rmd.computeMetricsFromFacts();
+			ZonedDateTime childFs = parentReleaseMetrics.getFirstScanned();
+			if (childFs == null) {
+				allChildrenScanned[0] = false;
+			} else if (maxChildFirstScanned[0] == null || childFs.isAfter(maxChildFirstScanned[0])) {
+				maxChildFirstScanned[0] = childFs;
+			}
 		});
+		// mergeWithByContent above only takes max-of-non-null for firstScanned,
+		// which is wrong for the rollup contract. Override with all-or-nothing.
+		rmd.setFirstScanned(allChildrenScanned[0] ? maxChildFirstScanned[0] : null);
 		vulnAnalysisService.processReleaseMetricsDto(rd.getOrg(), rd.getUuid(), AnalysisScope.RELEASE, rmd);
 		return rmd;
 	}

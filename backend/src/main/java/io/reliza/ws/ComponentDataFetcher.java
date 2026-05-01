@@ -33,6 +33,7 @@ import com.netflix.graphql.dgs.internal.DgsWebMvcRequestData;
 
 import io.reliza.common.CommonVariables;
 import io.reliza.common.CommonVariables.CallType;
+import io.reliza.common.CommonVariables.PerspectiveType;
 import io.reliza.common.CommonVariables.VersionResponse;
 import io.reliza.common.Utils;
 import io.reliza.model.UserPermission.PermissionFunction;
@@ -62,6 +63,7 @@ import io.reliza.model.dto.ComponentDto;
 import io.reliza.model.dto.ProgrammaticAuthContext;
 import io.reliza.service.ApiKeyService;
 import io.reliza.service.AuthorizationService;
+import io.reliza.service.AuthorizationService.FreeformKeyVerification;
 import io.reliza.service.BranchService;
 import io.reliza.service.ComponentService;
 import io.reliza.service.GetComponentService;
@@ -220,6 +222,7 @@ public class ComponentDataFetcher {
 		var servletWebRequest = (ServletWebRequest) requestData.getWebRequest();
 		ProgrammaticAuthContext authCtx = authorizationService.authenticateProgrammaticWithOrg(requestData.getHeaders(), servletWebRequest);
 		var ahp = authCtx.ahp();
+		UUID authOrgUuid = authCtx.orgUuid();
 		if (null == ahp ) throw new AccessDeniedException("Invalid authorization type");
 
 		Map<String, Object> getNewVersionInput = dfe.getArgument("newVersionInput");
@@ -237,19 +240,68 @@ public class ComponentDataFetcher {
 				throw new RelizaException("Component cannot be resolved: " + e.getMessage());
 			}
 		}
-		
+
+		// Optional perspective for component creation. Only meaningful when the component
+		// does not yet exist and createComponentIfMissing=true; otherwise it's ignored.
+		String perspectiveStr = (String) getNewVersionInput.get("perspective");
+		UUID perspectiveUuid = StringUtils.isNotEmpty(perspectiveStr) ? UUID.fromString(perspectiveStr) : null;
+
 		List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.COMPONENT, ApiTypeEnum.ORGANIZATION_RW);
 		Optional<ComponentData> ocd = (componentId != null) ? getComponentService.getComponentData(componentId) : Optional.empty();
 		RelizaObject ro = ocd.isPresent() ? ocd.get() : null;
 		AuthorizationResponse ar = AuthorizationResponse.initialize(InitType.FORBID);
 		if (null != ro) {
-			ar = authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, ro.getOrg(), CallType.WRITE, ro);
+			// Existing component. Accept the historic key types (COMPONENT, ORGANIZATION_RW),
+			// or a FREEFORM key whose permissions cover this component.
+			if (ahp.getType() == ApiTypeEnum.FREEFORM) {
+				FreeformKeyVerification fkv = authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+						ahp, PermissionFunction.RESOURCE, PermissionScope.COMPONENT, ro.getUuid(),
+						List.of(ro), CallType.WRITE);
+				ar = AuthorizationResponse.initialize(InitType.ALLOW);
+				ar.setWhoUpdated(fkv.whoUpdated());
+			} else {
+				ar = authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, ro.getOrg(), CallType.WRITE, ro);
+			}
+		} else if (perspectiveUuid != null) {
+			// Component will be created and assigned to a perspective. Required scope on the
+			// API key is WRITE on the perspective (FREEFORM keys), or ORGANIZATION_RW which
+			// covers the perspective implicitly. Only real perspectives are accepted.
+			if (authOrgUuid == null) throw new AccessDeniedException("Invalid authorization type");
+			var pd = ossPerspectiveService.getPerspectiveData(perspectiveUuid)
+					.orElseThrow(() -> new RelizaException("Perspective not found"));
+			if (pd.getType() != PerspectiveType.PERSPECTIVE) {
+				throw new RelizaException("Cannot create component in a product-derived perspective");
+			}
+			OrganizationData od = getOrganizationService.getOrganizationData(authOrgUuid).get();
+			if (ahp.getType() == ApiTypeEnum.FREEFORM) {
+				FreeformKeyVerification fkv = authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+						ahp, PermissionFunction.RESOURCE, PermissionScope.PERSPECTIVE, perspectiveUuid,
+						List.of(od, pd), CallType.WRITE);
+				ar = AuthorizationResponse.initialize(InitType.ALLOW);
+				ar.setWhoUpdated(fkv.whoUpdated());
+			} else {
+				ar = authorizationService.isApiKeyAuthorized(ahp, List.of(ApiTypeEnum.ORGANIZATION_RW),
+						authOrgUuid, CallType.WRITE, od);
+			}
+			ro = od;
 		} else {
-			// Component doesn't exist yet - authorize against org for component creation
-			ro = getOrganizationService.getOrganizationData(ahp.getOrgUuid()).get();
-			ar = authorizationService.isApiKeyAuthorized(ahp, List.of(ApiTypeEnum.ORGANIZATION_RW), ahp.getOrgUuid(), CallType.WRITE, ro);
+			// Component doesn't exist yet, no perspective requested - authorize org-wide for creation.
+			// FREEFORM keys carry their org UUID in authCtx.orgUuid(); ahp.getOrgUuid() is
+			// only populated for legacy ORGANIZATION_RW / COMPONENT keys, so use authOrgUuid
+			// here to avoid NPE on the createcomponent path with FREEFORM keys.
+			if (authOrgUuid == null) throw new AccessDeniedException("Invalid authorization type");
+			ro = getOrganizationService.getOrganizationData(authOrgUuid).get();
+			if (ahp.getType() == ApiTypeEnum.FREEFORM) {
+				FreeformKeyVerification fkv = authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+						ahp, PermissionFunction.RESOURCE, PermissionScope.ORGANIZATION, authOrgUuid,
+						List.of(ro), CallType.WRITE);
+				ar = AuthorizationResponse.initialize(InitType.ALLOW);
+				ar.setWhoUpdated(fkv.whoUpdated());
+			} else {
+				ar = authorizationService.isApiKeyAuthorized(ahp, List.of(ApiTypeEnum.ORGANIZATION_RW), authOrgUuid, CallType.WRITE, ro);
+			}
 		}
-		
+
 		// If component was not resolved, create it now (authorization was done earlier)
 		if (componentId == null) {
 			String vcsUri = (String) getNewVersionInput.get("vcsUri");
@@ -268,9 +320,14 @@ public class ComponentDataFetcher {
 					vcsType = VcsType.resolveStringToType(vcsTypeStr);
 				}
 			}
-			ComponentData newComponent = componentService.createComponentFromVcsUri(ahp.getOrgUuid(), vcsUri, repoPath, vcsDisplayName, vcsType, versionSchema, featureBranchVersionSchema, componentNameOverride, ar.getWhoUpdated());
+			ComponentData newComponent = componentService.createComponentFromVcsUri(authOrgUuid, vcsUri, repoPath, vcsDisplayName, vcsType, versionSchema, featureBranchVersionSchema, componentNameOverride, ar.getWhoUpdated());
 			componentId = newComponent.getUuid();
-			ocd = Optional.of(newComponent);
+			if (perspectiveUuid != null) {
+				componentService.setPerspectives(componentId, List.of(perspectiveUuid), ar.getWhoUpdated());
+				ocd = getComponentService.getComponentData(componentId);
+			} else {
+				ocd = Optional.of(newComponent);
+			}
 		}
 		
 		String branchStr = (String) getNewVersionInput.get(CommonVariables.BRANCH_FIELD);
@@ -363,11 +420,13 @@ public class ComponentDataFetcher {
 	public ComponentDto createComponentProgrammatic(DgsDataFetchingEnvironment dfe) throws RelizaException {
 		DgsWebMvcRequestData requestData =  (DgsWebMvcRequestData) DgsContext.getRequestData(dfe);
 		var servletWebRequest = (ServletWebRequest) requestData.getWebRequest();
-		var ahp = authorizationService.authenticateProgrammatic(requestData.getHeaders(), servletWebRequest);
-		if (null == ahp ) throw new AccessDeniedException("Invalid authorization type");
-
-		UUID orgUuid = ahp.getOrgUuid();
-		if (null == orgUuid) throw new AccessDeniedException("Not authorized");
+		ProgrammaticAuthContext authCtx = authorizationService.authenticateProgrammaticWithOrg(requestData.getHeaders(), servletWebRequest);
+		var ahp = authCtx.ahp();
+		// FREEFORM keys carry their org UUID on authCtx; ahp.getOrgUuid() is only
+		// populated for legacy ORGANIZATION_RW / COMPONENT keys, so source from
+		// authCtx so both key types work.
+		UUID orgUuid = authCtx.orgUuid();
+		if (null == ahp || null == orgUuid) throw new AccessDeniedException("Invalid authorization type");
 
 		Map<String, Object> createComponentInputMap = dfe.getArgument("component");
 		CreateComponentDto cpd = Utils.OM.convertValue(createComponentInputMap, CreateComponentDto.class);
@@ -376,7 +435,7 @@ public class ComponentDataFetcher {
 		if (cpd.getType() != ComponentType.COMPONENT && cpd.getType() != ComponentType.PRODUCT) {
 			throw new RelizaException("Component type not allowed, must be COMPONENT or PRODUCT");
 		}
-		
+
 		List<RelizaObject> ros = new LinkedList<>();
 		Optional<OrganizationData> ood = getOrganizationService.getOrganizationData(orgUuid);
 		ros.add(ood.orElse(null));
@@ -390,8 +449,17 @@ public class ComponentDataFetcher {
 		if (null == orgCheckUuid) throw new AccessDeniedException("Not authorized");
 
 		RelizaObject ro = ood.isPresent() ? ood.get() : null;
-		List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.ORGANIZATION_RW);
-		AuthorizationResponse ar = authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgUuid, CallType.WRITE, ro);
+		AuthorizationResponse ar;
+		if (ahp.getType() == ApiTypeEnum.FREEFORM) {
+			FreeformKeyVerification fkv = authorizationService.isFreeformKeyAuthorizedForObjectGraphQL(
+					ahp, PermissionFunction.RESOURCE, PermissionScope.ORGANIZATION, orgUuid,
+					ros, CallType.WRITE);
+			ar = AuthorizationResponse.initialize(InitType.ALLOW);
+			ar.setWhoUpdated(fkv.whoUpdated());
+		} else {
+			List<ApiTypeEnum> supportedApiTypes = Arrays.asList(ApiTypeEnum.ORGANIZATION_RW);
+			ar = authorizationService.isApiKeyAuthorized(ahp, supportedApiTypes, orgUuid, CallType.WRITE, ro);
+		}
 
 		Optional<VcsRepository> vcsRepo = Optional.empty();
 		
