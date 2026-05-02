@@ -6,13 +6,18 @@ package io.reliza.service.tea;
 import java.net.URI;
 import java.time.OffsetDateTime;
 import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.LinkedList;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.regex.Pattern;
 
 import org.apache.commons.lang3.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -40,6 +45,7 @@ import io.reliza.model.tea.TeaChecksum;
 import io.reliza.model.tea.TeaCle;
 import io.reliza.model.tea.TeaCleEvent;
 import io.reliza.model.tea.TeaCleEventType;
+import io.reliza.model.tea.TeaCleVersionSpecifier;
 import io.reliza.model.tea.TeaCollection;
 import io.reliza.model.tea.TeaCollectionBelongsToType;
 import io.reliza.model.tea.TeaCollectionUpdateReason;
@@ -388,41 +394,293 @@ public class TeaTransformerService {
 		return ta;
 	}
 	
+	/**
+	 * Single-release CLE: events derived from this release's own LIFECYCLE
+	 * updateEvents, plus a synthetic {@code released} when the release was
+	 * created directly at GA (no <GA→GA transition exists in history). Used
+	 * by the {@code /componentRelease/{uuid}/cle} endpoint and as the
+	 * building block for the component-level aggregate.
+	 */
 	public TeaCle transformReleaseToCle(ReleaseData rd) {
-		List<TeaCleEvent> events = new LinkedList<>();
-		int idCounter = 0;
-		for (var ue : rd.getUpdateEvents()) {
-			if (ue.rus() != ReleaseUpdateScope.LIFECYCLE) continue;
-			TeaCleEventType cleType = mapLifecycleToCleEventType(ue.newValue());
-			if (cleType == null) continue;
-			OffsetDateTime ts = ue.date().toOffsetDateTime().truncatedTo(ChronoUnit.SECONDS);
-			TeaCleEvent event = new TeaCleEvent(idCounter++, cleType, ts, ts);
-			event.setVersion(rd.getVersion());
-			if (cleType == TeaCleEventType.WITHDRAWN && StringUtils.isNotEmpty(ue.oldValue())) {
-				event.setReason(ue.oldValue() + " -> " + ue.newValue());
-			}
-			events.add(event);
-		}
-		events.sort((a, b) -> Integer.compare(b.getId(), a.getId()));
+		List<TeaCleEvent> events = new LinkedList<>(buildReleaseCleCandidates(rd));
+		// Single release scope — no minute-merging across releases. Just
+		// renumber + sort newest-first by effective.
+		renumberAndSortNewestFirst(events);
 		return new TeaCle(events);
 	}
 
-	private TeaCleEventType mapLifecycleToCleEventType(String lifecycleStr) {
-		if (lifecycleStr == null) return null;
-		try {
-			ReleaseLifecycle lc = ReleaseLifecycle.valueOf(lifecycleStr);
-			return switch (lc) {
-				case GENERAL_AVAILABILITY -> TeaCleEventType.RELEASED;
-				case END_OF_MARKETING -> TeaCleEventType.END_OF_MARKETING;
-				case END_OF_DISTRIBUTION -> TeaCleEventType.END_OF_DISTRIBUTION;
-				case END_OF_SUPPORT -> TeaCleEventType.END_OF_SUPPORT;
-				case END_OF_LIFE -> TeaCleEventType.END_OF_LIFE;
-				case CANCELLED, REJECTED -> TeaCleEventType.WITHDRAWN;
-				default -> null;
-			};
-		} catch (IllegalArgumentException e) {
-			return null;
+	/**
+	 * Component-level CLE: chronological union of every release's LIFECYCLE
+	 * events (one {@code released} per crossing &lt; GA → ≥ GA, plus the
+	 * post-GA transitions) merged by (eventType, minute). Component-level
+	 * NAME changes from {@code component.updateEvents} surface as
+	 * {@code componentRenamed} events. {@code released} stays one event per
+	 * release per spec (single {@code version} field, not a range).
+	 */
+	public TeaCle transformComponentToCle(ComponentData cd) {
+		return transformComponentOrProductToCle(cd);
+	}
+
+	public TeaCle transformProductToCle(ComponentData cd) {
+		return transformComponentOrProductToCle(cd);
+	}
+
+	private TeaCle transformComponentOrProductToCle(ComponentData cd) {
+		List<TeaCleEvent> all = new ArrayList<>();
+		// 300-cap mirrors the rest of the TEA surface; pagination is a TODO.
+		List<ReleaseData> releases = sharedReleaseService.listReleaseDatasOfComponent(cd.getUuid(), 300, 0);
+		for (ReleaseData rd : releases) {
+			all.addAll(buildReleaseCleCandidates(rd));
 		}
+		all.addAll(buildComponentRenameCandidates(cd));
+		List<TeaCleEvent> merged = mergeNonReleasedByMinute(all);
+		renumberAndSortNewestFirst(merged);
+		return new TeaCle(merged);
+	}
+
+	/**
+	 * Convert a release's LIFECYCLE history into TEA CLE event candidates.
+	 * <ul>
+	 *   <li>Crossing {@code <GA → ≥GA} ⇒ a {@code released} event whose
+	 *       {@code version} is the release version.</li>
+	 *   <li>Any other lifecycle change ⇒ the matching post-release CLE
+	 *       event type (END_OF_*, etc.) carrying a single-version
+	 *       {@code versions} entry.</li>
+	 *   <li>Release was minted directly at ≥ GA via CLI (no LIFECYCLE
+	 *       events in history) ⇒ synthesize a {@code released} event at
+	 *       {@code release.createdDate}.</li>
+	 * </ul>
+	 * Each candidate is stamped with id=-1; callers renumber after merging.
+	 */
+	private List<TeaCleEvent> buildReleaseCleCandidates(ReleaseData rd) {
+		List<TeaCleEvent> out = new LinkedList<>();
+		boolean sawAnyLifecycleEvent = false;
+		boolean sawReleasedEvent = false;
+		if (rd.getUpdateEvents() != null) {
+			for (var ue : rd.getUpdateEvents()) {
+				if (ue.rus() != ReleaseUpdateScope.LIFECYCLE) continue;
+				sawAnyLifecycleEvent = true;
+				ReleaseLifecycle oldLc = parseLifecycle(ue.oldValue());
+				ReleaseLifecycle newLc = parseLifecycle(ue.newValue());
+				if (newLc == null) continue;
+				OffsetDateTime ts = ue.date().toOffsetDateTime().truncatedTo(ChronoUnit.SECONDS);
+				if (isCrossingIntoGa(oldLc, newLc)) {
+					out.add(makeReleasedEvent(rd.getVersion(), ts));
+					sawReleasedEvent = true;
+				} else {
+					TeaCleEventType cleType = mapLifecycleToCleEventType(newLc);
+					if (cleType == null) continue;
+					out.add(makeVersionEvent(cleType, rd.getVersion(), ts));
+				}
+			}
+		}
+		// Direct-create-at-GA fallback: if the release has no LIFECYCLE
+		// events at all *and* its current lifecycle is ≥ GA (e.g.
+		// `rearm addrelease --lifecycle ASSEMBLED` then never transitioned,
+		// or — more typically — `--lifecycle GA` minted directly), still
+		// emit a single `released` keyed at createdDate so the CLE story
+		// reflects reality.
+		if (!sawAnyLifecycleEvent && !sawReleasedEvent
+				&& rd.getLifecycle() != null
+				&& rd.getLifecycle().ordinal() >= ReleaseLifecycle.GENERAL_AVAILABILITY.ordinal()
+				&& rd.getCreatedDate() != null) {
+			OffsetDateTime ts = rd.getCreatedDate().toOffsetDateTime().truncatedTo(ChronoUnit.SECONDS);
+			out.add(makeReleasedEvent(rd.getVersion(), ts));
+		}
+		return out;
+	}
+
+	private List<TeaCleEvent> buildComponentRenameCandidates(ComponentData cd) {
+		List<TeaCleEvent> out = new LinkedList<>();
+		if (cd.getUpdateEvents() == null) return out;
+		for (var ue : cd.getUpdateEvents()) {
+			if (ue.cus() != ComponentData.ComponentUpdateScope.NAME) continue;
+			if (ue.cua() != ComponentData.ComponentUpdateAction.CHANGED) continue;
+			OffsetDateTime ts = ue.date().toOffsetDateTime().truncatedTo(ChronoUnit.SECONDS);
+			TeaCleEvent ev = new TeaCleEvent(-1, TeaCleEventType.COMPONENT_RENAMED, ts, ts);
+			// Per spec 7.8 — `identifiers[]` carries the NEW identifiers for
+			// the component. ReARM's TeaIdentifierType doesn't include NAME
+			// (only CPE/TEI/PURL/COMPLIANCE_DOCUMENT), so we snapshot
+			// whatever identifiers are configured on the component at emit
+			// time and put the human-readable old→new name in description.
+			if (cd.getIdentifiers() != null && !cd.getIdentifiers().isEmpty()) {
+				ev.setIdentifiers(new ArrayList<>(cd.getIdentifiers()));
+			}
+			if (StringUtils.isNotEmpty(ue.newValue())) {
+				ev.setDescription(StringUtils.isNotEmpty(ue.oldValue())
+						? "Renamed: " + ue.oldValue() + " → " + ue.newValue()
+						: "Renamed to: " + ue.newValue());
+			}
+			out.add(ev);
+		}
+		return out;
+	}
+
+	private TeaCleEvent makeReleasedEvent(String version, OffsetDateTime ts) {
+		TeaCleEvent ev = new TeaCleEvent(-1, TeaCleEventType.RELEASED, ts, ts);
+		// Spec 7.1 — released carries a single `version` field (string),
+		// never the `versions` array. Don't merge across releases.
+		ev.setVersion(version);
+		return ev;
+	}
+
+	private TeaCleEvent makeVersionEvent(TeaCleEventType type, String version, OffsetDateTime ts) {
+		TeaCleEvent ev = new TeaCleEvent(-1, type, ts, ts);
+		// Spec 7.2-7.6 — Version Events use `versions[]` of VERS specifiers.
+		// One specifier per concrete version; merging happens in
+		// mergeNonReleasedByMinute when multiple releases hit the same
+		// (type, minute).
+		ev.setVersions(new ArrayList<>(List.of(versionSpecifierFor(version))));
+		return ev;
+	}
+
+	// vers:semver/<v> when the version parses as semver, else
+	// vers:generic/<v>. We don't implement full VERS ranges in v1 — each
+	// entry is a single concrete version. Range field is used because the
+	// spec expects vers: URIs there; version field stays bare for max
+	// compatibility with consumers that read either.
+	private static final Pattern SEMVER_PATTERN = Pattern.compile("^\\d+\\.\\d+\\.\\d+(?:[-+].*)?$");
+
+	private static TeaCleVersionSpecifier versionSpecifierFor(String version) {
+		TeaCleVersionSpecifier s = new TeaCleVersionSpecifier();
+		s.setVersion(version);
+		String scheme = (version != null && SEMVER_PATTERN.matcher(version).matches())
+				? "semver"
+				: "generic";
+		s.setRange("vers:" + scheme + "/" + (version == null ? "" : version));
+		return s;
+	}
+
+	private static boolean isCrossingIntoGa(ReleaseLifecycle oldLc, ReleaseLifecycle newLc) {
+		if (newLc == null) return false;
+		if (newLc.ordinal() < ReleaseLifecycle.GENERAL_AVAILABILITY.ordinal()) return false;
+		// Old null = first lifecycle event we know of for this release. If
+		// new ≥ GA, treat as a crossing.
+		if (oldLc == null) return true;
+		return oldLc.ordinal() < ReleaseLifecycle.GENERAL_AVAILABILITY.ordinal();
+	}
+
+	private static ReleaseLifecycle parseLifecycle(String s) {
+		if (s == null) return null;
+		try { return ReleaseLifecycle.valueOf(s); }
+		catch (IllegalArgumentException e) { return null; }
+	}
+
+	/**
+	 * Map a post-GA lifecycle state to its TEA CLE event type. Pre-GA states
+	 * have no CLE counterpart — those changes don't surface in the CLE
+	 * stream. CANCELLED / REJECTED are treated as terminal-end-of-life
+	 * (per the spec, withdrawn is a meta event for revoking other events,
+	 * not a lifecycle state).
+	 */
+	private TeaCleEventType mapLifecycleToCleEventType(ReleaseLifecycle lc) {
+		if (lc == null) return null;
+		return switch (lc) {
+			case END_OF_MARKETING -> TeaCleEventType.END_OF_MARKETING;
+			case END_OF_DISTRIBUTION -> TeaCleEventType.END_OF_DISTRIBUTION;
+			case END_OF_SUPPORT -> TeaCleEventType.END_OF_SUPPORT;
+			case END_OF_LIFE, CANCELLED, REJECTED -> TeaCleEventType.END_OF_LIFE;
+			default -> null;
+		};
+	}
+
+	/**
+	 * Merge candidates of the same (TeaCleEventType, effective-truncated-to-minute)
+	 * into a single TEA CLE event whose {@code versions[]} is the union
+	 * of the source events' specifiers. {@code released} events are
+	 * passed through unchanged (single-version field, never merged).
+	 * COMPONENT_RENAMED stays one event per rename.
+	 */
+	private List<TeaCleEvent> mergeNonReleasedByMinute(List<TeaCleEvent> in) {
+		Map<String, TeaCleEvent> bucket = new LinkedHashMap<>();
+		List<TeaCleEvent> passthrough = new LinkedList<>();
+		for (TeaCleEvent ev : in) {
+			if (ev.getType() == TeaCleEventType.RELEASED
+					|| ev.getType() == TeaCleEventType.COMPONENT_RENAMED) {
+				passthrough.add(ev);
+				continue;
+			}
+			OffsetDateTime minute = ev.getEffective() != null
+					? ev.getEffective().truncatedTo(ChronoUnit.MINUTES)
+					: null;
+			String key = ev.getType().toString() + "|" + minute;
+			TeaCleEvent existing = bucket.get(key);
+			if (existing == null) {
+				// First sighting at this (type, minute) — adopt as-is but
+				// snap the effective timestamp down to the minute boundary
+				// so consumers see a clean per-minute aggregate.
+				if (minute != null) ev.setEffective(minute);
+				if (ev.getPublished() != null) ev.setPublished(minute);
+				bucket.put(key, ev);
+			} else {
+				// Subsequent — merge versions[]. Avoid duplicates by
+				// comparing the bare version field (which is what we set in
+				// versionSpecifierFor for both semver and generic schemes).
+				if (ev.getVersions() != null) {
+					for (var spec : ev.getVersions()) {
+						boolean dup = existing.getVersions() != null
+								&& existing.getVersions().stream().anyMatch(s ->
+										java.util.Objects.equals(s.getVersion(), spec.getVersion()));
+						if (!dup) {
+							if (existing.getVersions() == null) existing.setVersions(new ArrayList<>());
+							existing.getVersions().add(spec);
+						}
+					}
+				}
+			}
+		}
+		List<TeaCleEvent> out = new LinkedList<>(bucket.values());
+		out.addAll(passthrough);
+		return out;
+	}
+
+	// Spec 6.1 — `$schema` is a stable per-version URI; until ECMA publish a
+	// canonical one, the spec uses cle.example.com as the documentation
+	// placeholder. Match that so consumers can recognise the version.
+	private static final String CLE_SCHEMA_URI = "https://cle.example.com/schema/cle-1.0.0.schema.json";
+
+	/**
+	 * Wrap a {@link TeaCle} (events list) with the CLE-spec-required
+	 * top-level fields ({@code $schema}, {@code identifier},
+	 * {@code updatedAt}) so the result is a self-contained CLE-1.0.0 JSON
+	 * document. Used by the {@code exportComponentCleManual} /
+	 * {@code exportReleaseCleManual} GraphQL queries.
+	 *
+	 * @param cle the events container produced by {@code transform*ToCle}
+	 * @param identifiers PURL identifiers for the component this document
+	 *                    describes; may be null/empty (then the field is
+	 *                    emitted as an empty array)
+	 */
+	public com.fasterxml.jackson.databind.JsonNode wrapAsCleDocument(TeaCle cle, java.util.List<io.reliza.model.tea.TeaIdentifier> identifiers) {
+		com.fasterxml.jackson.databind.node.ObjectNode root = io.reliza.common.Utils.OM.createObjectNode();
+		root.put("$schema", CLE_SCHEMA_URI);
+		// identifier field — spec accepts string OR array. Always array for
+		// uniformity. PURLs only, since spec ties this to the PURL format.
+		com.fasterxml.jackson.databind.node.ArrayNode idArr = root.putArray("identifier");
+		if (identifiers != null) {
+			for (var id : identifiers) {
+				if (id == null) continue;
+				if (id.getIdType() != null
+						&& "PURL".equalsIgnoreCase(id.getIdType().getValue())
+						&& id.getIdValue() != null) {
+					idArr.add(id.getIdValue());
+				}
+			}
+		}
+		root.put("updatedAt", OffsetDateTime.now().truncatedTo(ChronoUnit.SECONDS).toString());
+		root.set("events", io.reliza.common.Utils.OM.valueToTree(cle.getEvents()));
+		if (cle.getDefinitions() != null) {
+			root.set("definitions", io.reliza.common.Utils.OM.valueToTree(cle.getDefinitions()));
+		}
+		return root;
+	}
+
+	private static void renumberAndSortNewestFirst(List<TeaCleEvent> events) {
+		events.sort(Comparator.comparing(
+				(TeaCleEvent e) -> e.getEffective(),
+				Comparator.nullsLast(Comparator.reverseOrder())));
+		int id = 0;
+		for (TeaCleEvent ev : events) ev.setId(id++);
 	}
 
 	public TeaCollection transformAcollectionToTea(AcollectionData acd) {

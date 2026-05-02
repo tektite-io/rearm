@@ -16,6 +16,7 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 
 import io.reliza.model.ComponentData.ComponentType;
+import io.reliza.model.tea.TeaCle;
 import io.reliza.model.tea.TeaPaginatedProductReleaseResponse;
 import io.reliza.model.tea.TeaProduct;
 import io.reliza.model.tea.TeaProductRelease;
@@ -95,6 +96,17 @@ public class ProductApiController implements ProductApi {
             }
 
         }
+
+    @Override
+    public ResponseEntity<TeaCle> getCleByProductId(
+            @Parameter(name = "uuid", description = "UUID of TEA Product in the TEA server", required = true, in = ParameterIn.PATH) @PathVariable("uuid") UUID uuid
+        ) {
+        var opd = getComponentService.getComponentData(uuid);
+        if (opd.isEmpty() || opd.get().getType() != ComponentType.PRODUCT || !UserService.USER_ORG.equals(opd.get().getOrg())) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(teaTransformerService.transformProductToCle(opd.get()));
+    }
 
 
 }

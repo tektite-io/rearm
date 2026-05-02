@@ -4,6 +4,7 @@
 
 package io.reliza.model;
 
+import java.time.ZonedDateTime;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -99,6 +100,38 @@ public class ComponentData extends RelizaDataParent implements RelizaObject {
 		private Set<UUID> outputEventsOverride;
 	}
 	
+	/**
+	 * Component-level lifecycle / metadata change scope. Drives both the
+	 * audit history on a component and the CLE event derivation: NAME
+	 * changes surface as componentRenamed events at the TEA layer.
+	 */
+	public enum ComponentUpdateScope {
+		NAME,
+		LIFECYCLE,
+		// reserved for follow-up work (CLE supersededBy event, etc.)
+		SUPERSEDED_BY
+	}
+
+	public enum ComponentUpdateAction {
+		ADDED,
+		REMOVED,
+		CHANGED
+	}
+
+	/**
+	 * Mirrors {@code ReleaseData.ReleaseUpdateEvent} but scoped to changes
+	 * that apply to the component as a whole (renames being the primary
+	 * driver in v1). Stored as part of {@code recordData} jsonb on the
+	 * component row, so adding new entries needs no schema migration.
+	 */
+	public record ComponentUpdateEvent(
+			ComponentUpdateScope cus,
+			ComponentUpdateAction cua,
+			String oldValue,
+			String newValue,
+			ZonedDateTime date,
+			WhoUpdated wu) {}
+
 	public enum ConditionType {
 		APPROVAL_ENTRY,
 		LIFECYCLE,
@@ -174,6 +207,14 @@ public class ComponentData extends RelizaDataParent implements RelizaObject {
 		private ReleaseLifecycle snapshotLifecycle; // if set → LIFECYCLE-type snapshot
 		// ADD_APPROVED_ENVIRONMENT: environment string to add to release.approvedEnvironments when fired
 		private String approvedEnvironment;
+		// EXTERNAL_VALIDATION: override the check-run name reported to the SCM.
+		// Defaults to `rearm/<componentName>` when null/empty (legacy behaviour).
+		// Use case: GitHub branch protection's "Required status checks" list
+		// matches by exact string — wildcards are not supported — so an
+		// org-wide policy that wants a single required-check entry covering
+		// many components has to opt every component's output event into the
+		// same unified name (e.g. `rearm/policy`).
+		private String checkName;
 	}
 	
 	@JsonProperty
@@ -243,6 +284,19 @@ public class ComponentData extends RelizaDataParent implements RelizaObject {
 	
 	@JsonProperty
 	private ComponentAuthentication authentication;
+
+	/**
+	 * Audit + CLE-source history for component-as-a-whole changes. Renames
+	 * land here as NAME/CHANGED events; the CLE emitter walks this list
+	 * to surface componentRenamed events at the TEA layer.
+	 */
+	@JsonProperty
+	private List<ComponentUpdateEvent> updateEvents = new LinkedList<>();
+
+	public void addUpdateEvent(ComponentUpdateEvent event) {
+		if (this.updateEvents == null) this.updateEvents = new LinkedList<>();
+		this.updateEvents.add(event);
+	}
 
 	/**
 	 * Component-level override for branch suffix mode. Nullable.

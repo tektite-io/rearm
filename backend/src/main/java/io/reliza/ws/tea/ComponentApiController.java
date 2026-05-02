@@ -13,6 +13,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 
 import io.reliza.model.ComponentData.ComponentType;
+import io.reliza.model.tea.TeaCle;
 import io.reliza.model.tea.TeaComponent;
 import io.reliza.model.tea.TeaRelease;
 import io.reliza.service.GetComponentService;
@@ -82,4 +83,15 @@ public class ComponentApiController implements ComponentApi {
 	        	return ResponseEntity.ok(tc);
 	        }
         }
+
+    @Override
+    public ResponseEntity<TeaCle> getCleByComponentId(
+            @Parameter(name = "uuid", description = "UUID of TEA Component in the TEA server", required = true, in = ParameterIn.PATH) @PathVariable("uuid") UUID uuid
+        ) {
+        var ocd = getComponentService.getComponentData(uuid);
+        if (ocd.isEmpty() || ocd.get().getType() != ComponentType.COMPONENT || !UserService.USER_ORG.equals(ocd.get().getOrg())) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(teaTransformerService.transformComponentToCle(ocd.get()));
+    }
 }

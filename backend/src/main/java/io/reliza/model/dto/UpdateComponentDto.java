@@ -57,6 +57,7 @@ public class UpdateComponentDto {
 		private UUID snapshotApprovalEntry;
 		private ReleaseLifecycle snapshotLifecycle;
 		private String approvedEnvironment;
+		private String checkName;
 	}
 	
 	@JsonProperty(CommonVariables.UUID_FIELD)
@@ -156,6 +157,9 @@ public class UpdateComponentDto {
 		}
 		if (StringUtils.isNotEmpty(roei.getApprovedEnvironment())) {
 			builder.approvedEnvironment(roei.getApprovedEnvironment());
+		}
+		if (StringUtils.isNotEmpty(roei.getCheckName())) {
+			builder.checkName(roei.getCheckName());
 		}
 		return builder.build();
 	}

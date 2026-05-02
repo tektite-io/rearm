@@ -70,6 +70,7 @@ import io.reliza.service.GetComponentService;
 import io.reliza.service.GetOrganizationService;
 import io.reliza.service.OrganizationService;
 import io.reliza.service.ReleaseVersionService;
+import io.reliza.service.SharedReleaseService;
 import io.reliza.service.UserService;
 import io.reliza.service.VcsRepositoryService;
 import io.reliza.service.VersionAssignmentService.GetNewVersionDto;
@@ -116,6 +117,9 @@ public class ComponentDataFetcher {
 
 	@Autowired
 	private OssPerspectiveService ossPerspectiveService;
+
+	@Autowired
+	private SharedReleaseService sharedReleaseService;
 
 	@PreAuthorize("isAuthenticated()")
 	@DgsData(parentType = "Query", field = "component")
@@ -556,6 +560,41 @@ public class ComponentDataFetcher {
 
 /* Sub-fields */
 	
+	@DgsData(parentType = "Component", field = "effectiveLifecycle")
+	public ReleaseLifecycle effectiveLifecycle(DgsDataFetchingEnvironment dfe) {
+		// Synthetic — derived from the component's releases at read time.
+		// Rules (per user spec):
+		//   if every release lc is ≤ GA → return max(lc) over those
+		//                                  (most-advanced pre/at-GA state)
+		//   else                          → return min(lc) over releases
+		//                                  whose lc is ≥ GA
+		//                                  (sub-GA releases ignored once
+		//                                   any release has reached GA)
+		// 300-cap mirrors the rest of the read surface; OK for v1.
+		ComponentData cd = dfe.getSource();
+		if (cd == null) return null;
+		var releases = sharedReleaseService.listReleaseDatasOfComponent(cd.getUuid(), 300, 0);
+		if (releases == null || releases.isEmpty()) return null;
+		final int gaOrd = ReleaseLifecycle.GENERAL_AVAILABILITY.ordinal();
+		ReleaseLifecycle minPostGa = null;
+		ReleaseLifecycle maxPreOrAtGa = null;
+		for (var rd : releases) {
+			ReleaseLifecycle lc = rd.getLifecycle();
+			if (lc == null) continue;
+			if (lc.ordinal() > gaOrd) {
+				if (minPostGa == null || lc.ordinal() < minPostGa.ordinal()) {
+					minPostGa = lc;
+				}
+			} else {
+				// ≤ GA bucket
+				if (maxPreOrAtGa == null || lc.ordinal() > maxPreOrAtGa.ordinal()) {
+					maxPreOrAtGa = lc;
+				}
+			}
+		}
+		return minPostGa != null ? minPostGa : maxPreOrAtGa;
+	}
+
 	@DgsData(parentType = "Component", field = "releaseInputTriggers")
 	public List<ReleaseInputEventDto> releaseInputTriggersWithScope(DgsDataFetchingEnvironment dfe) {
 		ComponentData cd = dfe.getSource();

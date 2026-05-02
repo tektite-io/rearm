@@ -292,6 +292,21 @@ public class ComponentService {
 			comp = op.get();
 			ComponentData cd = ComponentData.dataFromRecord(comp);
 			if (StringUtils.isNotEmpty(cdto.getName())) {
+				String previousName = cd.getName();
+				if (!cdto.getName().equals(previousName)) {
+					// Auto-record the rename so the component's CLE history
+					// surfaces a componentRenamed event at the TEA layer. Done
+					// here (not in saveComponent) so non-rename updates don't
+					// pollute the audit list. Idempotent — equal-string updates
+					// are skipped above.
+					cd.addUpdateEvent(new ComponentData.ComponentUpdateEvent(
+							ComponentData.ComponentUpdateScope.NAME,
+							ComponentData.ComponentUpdateAction.CHANGED,
+							previousName,
+							cdto.getName(),
+							java.time.ZonedDateTime.now(),
+							wu));
+				}
 				cd.setName(cdto.getName());
 			}
 			if (null != cdto.getVersionSchema()) {

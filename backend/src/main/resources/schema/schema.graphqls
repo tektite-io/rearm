@@ -111,6 +111,21 @@ type Query {
 	license: LicensePayload
 	
 	exportAsObomManual(releaseUuid: ID!): String
+
+	"""
+	Export a CLE-spec-valid JSON document for a component (or product).
+	The events array is the same chronological union the TEA endpoint
+	returns; this query wraps it with the spec-required `$schema` and
+	`lastUpdated` metadata so the response stands alone as a CLE document.
+	"""
+	exportComponentCleManual(componentUuid: ID!): String
+
+	"""
+	Export a CLE-spec-valid JSON document for a single release. Mirrors
+	exportComponentCleManual at the release level — events come from
+	transformReleaseToCle.
+	"""
+	exportReleaseCleManual(releaseUuid: ID!): String
 	
 	# User Groups
 	getUserGroups(org: ID!): [UserGroupWebDto]
@@ -248,6 +263,21 @@ type Mutation {
 	setOrgApiKey(orgUuid: ID!, apiType: ApiTypeEnum!, keyOrder: String, notes: String): ApiKeyForUser
 	updateRelease(release: ReleaseInput!): Release
 	updateReleaseLifecycle(release: ID!, newLifecycle: ReleaseLifecycleEnum!): Release
+
+	"""
+	Bulk-advance every release of a component whose lifecycle is
+	≥ GENERAL_AVAILABILITY but < `targetLifecycle` to `targetLifecycle`.
+	Pre-GA releases (PENDING, DRAFT, ASSEMBLED, READY_TO_SHIP) and
+	terminal-state releases (CANCELLED, REJECTED) are untouched, as are
+	releases already at or beyond the target. Each bumped release records
+	a normal LIFECYCLE-CHANGED update event so per-release histories stay
+	coherent and the CLE synthesis surfaces the bump as a merged
+	component-level event by minute. `targetLifecycle` must be > GA
+	(ordinal-bounded so the validation survives future enum additions);
+	GA itself isn't a meaningful bulk target — that's the natural state
+	for assembled releases.
+	"""
+	bulkUpdateComponentReleaseLifecycle(componentUuid: ID!, targetLifecycle: ReleaseLifecycleEnum!): BulkLifecycleUpdateResult
 	updateReleaseTagsMeta(release: ReleaseInput!): Release
 	overrideApprovedEnvironments(releaseUuid: ID!, approvedEnvironments: [String!]!): Release
 	addMarketingReleaseManual(marketingRelease: MarketingReleaseInput!): MarketingRelease
@@ -515,6 +545,16 @@ type Component {
 	sidAuthoritySegments: [String!]
 	"""Internal/external classification (D16). Null on legacy rows is treated as INTERNAL."""
 	isInternal: BelongsToOrganization
+	"""
+	Synthetic component-level lifecycle derived from the lifecycles of the
+	component's releases:
+	- if every release lifecycle is ≤ GENERAL_AVAILABILITY, returns the
+	  most-advanced of those (i.e. max-pre-or-at-GA);
+	- otherwise returns the smallest lifecycle ≥ GENERAL_AVAILABILITY
+	  observed across releases (i.e. min-post-GA).
+	Null when the component has no releases.
+	"""
+	effectiveLifecycle: ReleaseLifecycleEnum
 }
 
 enum ComponentKind {
@@ -525,6 +565,13 @@ enum ComponentKind {
 type Identifier {
 	idType: IdentifierType
 	idValue: String
+}
+
+type BulkLifecycleUpdateResult {
+	"""Number of releases that were bumped to the target lifecycle."""
+	releasesBumped: Int!
+	"""UUIDs of the bumped releases (caller can re-fetch for fresh state)."""
+	releaseUuids: [ID!]!
 }
 
 type LicensePayload {
@@ -1515,6 +1562,13 @@ type ReleaseApprovalEvent {
 	state: ApprovalState
 	date: DateTime
 	wu: WhoUpdated
+	"""
+	Optional free-form approver comment, sanitised server-side via
+	jsoup's Safelist.basic() (allows simple inline tags, strips
+	scripts/styles/event handlers). Capped at 4000 chars at the input
+	boundary; empty-after-clean is normalised to null.
+	"""
+	comment: String
 }
 
 type ReleaseUpdateEvent {
@@ -1580,6 +1634,13 @@ type ReleaseOutputEvent {
     snapshotApprovalEntry: ID
     snapshotLifecycle: ReleaseLifecycleEnum
     approvedEnvironment: String
+    """
+    Override the check-run name reported to the SCM for EXTERNAL_VALIDATION
+    events. Defaults to `rearm/<componentName>` when null/empty. Set this
+    when an org-wide branch-protection rule needs a single unified
+    required-check entry (GitHub matches by exact string — no wildcards).
+    """
+    checkName: String
 }
 
 type GlobalInputEventRef {
@@ -2251,6 +2312,14 @@ input ReleaseApprovalInput {
 	approvalEntry: ID!
 	approvalRoleId: String!
 	state: ApprovalState!
+	"""
+	Optional free-form approver comment. Server sanitises via jsoup
+	Safelist.basic() and caps at 4000 chars; empty-after-clean is treated
+	as null. Reused for both the manual mutation and the programmatic
+	one — for the latter, approvalEntry may be either a UUID or an
+	approval-entry name (per existing semantics).
+	"""
+	comment: String
 }
 
 input EmailPropertiesInput {
@@ -2347,6 +2416,11 @@ input ReleaseOutputEventInput {
 	snapshotApprovalEntry: ID
 	snapshotLifecycle: ReleaseLifecycleEnum
 	approvedEnvironment: String
+	"""
+	Override the check-run name reported to the SCM for EXTERNAL_VALIDATION
+	events. Defaults to `rearm/<componentName>` when null/empty.
+	"""
+	checkName: String
 }
 
 input ReleaseInputEventInput {
@@ -3461,6 +3535,7 @@ type DownloadConfig {
 	artifactUuid: ID
 	artifactVersion: Int
 	releaseUuid: ID
+	componentUuid: ID
 	tldOnly: Boolean
 	ignoreDev: Boolean
 	structure: BomStructureType
@@ -3468,6 +3543,7 @@ type DownloadConfig {
 	mediaType: BomMediaType
 	excludeCoverageTypes: [ArtifactCoverageType]
 	includeSuppressed: Boolean
+	includeInTriage: Boolean
 	upToDate: DateTime
 	targetLifecycle: ReleaseLifecycleEnum
 	targetApproval: String
@@ -3477,10 +3553,13 @@ enum DownloadType {
 	ARTIFACT_DOWNLOAD
 	RAW_ARTIFACT_DOWNLOAD
 	VDR_EXPORT
+	VEX_EXPORT
 	SBOM_EXPORT
+	CLE_EXPORT
 }
 
 enum DownloadSubjectType {
 	ARTIFACT
 	RELEASE
+	COMPONENT
 }

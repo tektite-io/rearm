@@ -200,6 +200,9 @@ public class ReleaseDatafetcher {
 	@Autowired
 	private DownloadLogService downloadLogService;
 
+	@Autowired
+	private io.reliza.service.tea.TeaTransformerService teaTransformerService;
+
 	@PreAuthorize("isAuthenticated()")
 	@DgsData(parentType = "Query", field = "release")
 	public ReleaseData getRelease(
@@ -610,6 +613,35 @@ public class ReleaseDatafetcher {
 		WhoUpdated wu = WhoUpdated.getWhoUpdated(oud.get());
 		var r = ossReleaseService.updateReleaseLifecycle(releaseId, newLifecycle, wu);
 		return ReleaseData.dataFromRecord(r);
+	}
+
+	public record BulkLifecycleUpdateResult(Integer releasesBumped, List<UUID> releaseUuids) {}
+
+	@Transactional
+	@PreAuthorize("isAuthenticated()")
+	@DgsData(parentType = "Mutation", field = "bulkUpdateComponentReleaseLifecycle")
+	public BulkLifecycleUpdateResult bulkUpdateComponentReleaseLifecycle(
+			@InputArgument("componentUuid") UUID componentUuid,
+			@InputArgument("targetLifecycle") ReleaseLifecycle targetLifecycle) throws RelizaException {
+		JwtAuthenticationToken auth = (JwtAuthenticationToken) SecurityContextHolder.getContext().getAuthentication();
+		var oud = userService.getUserDataByAuth(auth);
+		// Ordinal-bounded validation so the rule survives future
+		// CLE-driven enum additions: target must be strictly past GA.
+		// Pre/at-GA targets aren't a meaningful bulk ceiling — bumping
+		// to GA is the natural per-release transition, and anything
+		// below GA isn't a valid post-release state anyway.
+		if (targetLifecycle == null
+				|| targetLifecycle.ordinal() <= ReleaseLifecycle.GENERAL_AVAILABILITY.ordinal()) {
+			throw new RelizaException("targetLifecycle must be strictly past GENERAL_AVAILABILITY");
+		}
+		Optional<ComponentData> ocd = getComponentService.getComponentData(componentUuid);
+		if (ocd.isEmpty()) throw new RelizaException("Component not found");
+		RelizaObject ro = ocd.get();
+		authorizationService.isUserAuthorizedForObjectGraphQL(oud.get(),
+				PermissionFunction.RESOURCE, PermissionScope.COMPONENT, componentUuid, List.of(ro), CallType.WRITE);
+		WhoUpdated wu = WhoUpdated.getWhoUpdated(oud.get());
+		List<UUID> bumped = ossReleaseService.bulkUpdateComponentReleaseLifecycle(componentUuid, targetLifecycle, wu);
+		return new BulkLifecycleUpdateResult(bumped.size(), bumped);
 	}
 	
 	@Transactional
@@ -1408,6 +1440,47 @@ public class ReleaseDatafetcher {
 		RelizaObject ro = ord.isPresent() ? ord.get() : null;
 		authorizationService.isUserAuthorizedForObjectGraphQL(oud.get(), PermissionFunction.ARTIFACT_DOWNLOAD, PermissionScope.RELEASE, releaseUuid, List.of(ro), CallType.READ);
 		return releaseService.exportReleaseAsObom(releaseUuid).toString();
+	}
+
+	@PreAuthorize("isAuthenticated()")
+	@DgsData(parentType = "Query", field = "exportComponentCleManual")
+	public String exportComponentCleManual(@InputArgument("componentUuid") UUID componentUuid) throws RelizaException {
+		JwtAuthenticationToken auth = (JwtAuthenticationToken) SecurityContextHolder.getContext().getAuthentication();
+		var oud = userService.getUserDataByAuth(auth);
+		Optional<ComponentData> ocd = getComponentService.getComponentData(componentUuid);
+		if (ocd.isEmpty()) throw new RelizaException("Component not found");
+		RelizaObject ro = ocd.get();
+		authorizationService.isUserAuthorizedForObjectGraphQL(oud.get(),
+				PermissionFunction.ARTIFACT_DOWNLOAD, PermissionScope.COMPONENT, componentUuid, List.of(ro), CallType.READ);
+		WhoUpdated wu = WhoUpdated.getWhoUpdated(oud.get());
+		DownloadConfig cfg = DownloadConfig.builder().componentUuid(componentUuid).build();
+		downloadLogService.createDownloadLog(ocd.get().getOrg(), DownloadType.CLE_EXPORT,
+				DownloadSubjectType.COMPONENT, componentUuid, wu, cfg);
+		var cle = teaTransformerService.transformComponentToCle(ocd.get());
+		return teaTransformerService.wrapAsCleDocument(cle, ocd.get().getIdentifiers()).toString();
+	}
+
+	@PreAuthorize("isAuthenticated()")
+	@DgsData(parentType = "Query", field = "exportReleaseCleManual")
+	public String exportReleaseCleManual(@InputArgument("releaseUuid") UUID releaseUuid) throws RelizaException {
+		JwtAuthenticationToken auth = (JwtAuthenticationToken) SecurityContextHolder.getContext().getAuthentication();
+		var oud = userService.getUserDataByAuth(auth);
+		Optional<ReleaseData> ord = sharedReleaseService.getReleaseData(releaseUuid);
+		if (ord.isEmpty()) throw new RelizaException("Release not found");
+		RelizaObject ro = ord.get();
+		authorizationService.isUserAuthorizedForObjectGraphQL(oud.get(),
+				PermissionFunction.ARTIFACT_DOWNLOAD, PermissionScope.RELEASE, releaseUuid, List.of(ro), CallType.READ);
+		WhoUpdated wu = WhoUpdated.getWhoUpdated(oud.get());
+		DownloadConfig cfg = DownloadConfig.builder().releaseUuid(releaseUuid).build();
+		downloadLogService.createDownloadLog(ord.get().getOrg(), DownloadType.CLE_EXPORT,
+				DownloadSubjectType.RELEASE, releaseUuid, wu, cfg);
+		var cle = teaTransformerService.transformReleaseToCle(ord.get());
+		// Identifier on the document points at the parent component's PURL
+		// — the release's own identifiers are version-scoped and would
+		// confuse consumers reading the CLE-doc-level identifier field.
+		Optional<ComponentData> ocd = getComponentService.getComponentData(ord.get().getComponent());
+		var identifiers = ocd.isPresent() ? ocd.get().getIdentifiers() : null;
+		return teaTransformerService.wrapAsCleDocument(cle, identifiers).toString();
 	}
 	
 	@PreAuthorize("isAuthenticated()")

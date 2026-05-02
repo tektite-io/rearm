@@ -85,17 +85,17 @@ public class ReleaseData extends RelizaDataParent implements RelizaObject, Gener
 	
 	public record ReleaseLifecycleEvent (ReleaseLifecycle oldLifecycle, ReleaseLifecycle newLifecycle, ZonedDateTime date, WhoUpdated wu) {}
 	
-	public record ReleaseApprovalEvent (UUID approvalEntry, String approvalRoleId, ApprovalState state, ZonedDateTime date, WhoUpdated wu) {}
-	
-	public record ReleaseApprovalInput (UUID approvalEntry, String approvalRoleId, ApprovalState state) {}
-	
-	public record ReleaseApprovalProgrammaticInputEntry (String approvalEntry, String approvalRoleId, ApprovalState state) {}
-	
-	public record ReleaseApprovalProgrammaticInput (List<ReleaseApprovalProgrammaticInputEntry> approvals, 
+	public record ReleaseApprovalEvent (UUID approvalEntry, String approvalRoleId, ApprovalState state, ZonedDateTime date, WhoUpdated wu, String comment) {}
+
+	public record ReleaseApprovalInput (UUID approvalEntry, String approvalRoleId, ApprovalState state, String comment) {}
+
+	public record ReleaseApprovalProgrammaticInputEntry (String approvalEntry, String approvalRoleId, ApprovalState state, String comment) {}
+
+	public record ReleaseApprovalProgrammaticInput (List<ReleaseApprovalProgrammaticInputEntry> approvals,
 			UUID release, UUID component, String version) {}
-	
+
 	public static ReleaseApprovalEvent approvalEventFromInput (ReleaseApprovalInput rai, WhoUpdated wu) {
-		return new ReleaseApprovalEvent(rai.approvalEntry(), rai.approvalRoleId(), rai.state(), ZonedDateTime.now(), wu);
+		return new ReleaseApprovalEvent(rai.approvalEntry(), rai.approvalRoleId(), rai.state(), ZonedDateTime.now(), wu, rai.comment());
 	}
 	
 	public enum ReleaseStatus {

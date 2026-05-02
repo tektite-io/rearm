@@ -25,12 +25,14 @@ public class DownloadLogData extends RelizaDataParent implements RelizaObject {
 		RAW_ARTIFACT_DOWNLOAD,
 		VDR_EXPORT,
 		VEX_EXPORT,
-		SBOM_EXPORT
+		SBOM_EXPORT,
+		CLE_EXPORT
 	}
 
 	public enum DownloadSubjectType {
 		ARTIFACT,
-		RELEASE
+		RELEASE,
+		COMPONENT
 	}
 
 	/** Single flat config class — only fields relevant to the DownloadType will be non-null. */
@@ -42,8 +44,11 @@ public class DownloadLogData extends RelizaDataParent implements RelizaObject {
 		private UUID artifactUuid;
 		private Integer artifactVersion;
 
-		// SBOM_EXPORT / VDR_EXPORT / OBOM_EXPORT
+		// SBOM_EXPORT / VDR_EXPORT / OBOM_EXPORT / VEX_EXPORT / CLE_EXPORT (release-scoped)
 		private UUID releaseUuid;
+
+		// CLE_EXPORT (component-scoped)
+		private UUID componentUuid;
 
 		// SBOM-specific
 		private Boolean tldOnly;
