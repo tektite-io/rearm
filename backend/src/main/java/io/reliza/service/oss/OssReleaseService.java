@@ -350,6 +350,47 @@ public class OssReleaseService {
 		return r;
 	}
 
+	/**
+	 * Bulk-advance every release of {@code componentUuid} whose lifecycle
+	 * is {@code ≥ GENERAL_AVAILABILITY && < targetLifecycle} to
+	 * {@code targetLifecycle}. Pre-GA releases (PENDING / DRAFT / ASSEMBLED
+	 * / READY_TO_SHIP) and terminal-state releases (CANCELLED / REJECTED)
+	 * stay where they are, as do releases already at or beyond the target.
+	 *
+	 * <p>Each bumped release goes through the standard
+	 * {@link #updateReleaseLifecycle(UUID, ReleaseLifecycle, WhoUpdated)}
+	 * path so the LIFECYCLE-CHANGED update event is recorded normally and
+	 * any downstream lifecycle-event triggers fire. Caller transaction
+	 * boundary is honoured by the @Transactional on this method — partial
+	 * failure rolls all bumps back together.
+	 *
+	 * <p>Caller validates that {@code targetLifecycle.ordinal() >
+	 * GENERAL_AVAILABILITY.ordinal()} (ordinal-bounded so future enum
+	 * additions don't need a code change). GA itself isn't a meaningful
+	 * bulk target.
+	 *
+	 * @return the UUIDs of the releases that were actually bumped
+	 */
+	@Transactional
+	public List<UUID> bulkUpdateComponentReleaseLifecycle(UUID componentUuid, ReleaseLifecycle targetLifecycle, WhoUpdated wu) {
+		final int gaOrdinal = ReleaseLifecycle.GENERAL_AVAILABILITY.ordinal();
+		final int targetOrdinal = targetLifecycle.ordinal();
+		List<UUID> bumped = new LinkedList<>();
+		var releases = sharedReleaseService.listReleaseDatasOfComponent(componentUuid, 1000, 0);
+		for (var rd : releases) {
+			ReleaseLifecycle lc = rd.getLifecycle();
+			if (lc == null) continue;
+			int lcOrdinal = lc.ordinal();
+			// Eligible: at-or-past GA, but strictly below the target.
+			// Pre-GA, CANCELLED, REJECTED all sit below GA in the enum
+			// ordering, so the lower bound naturally excludes them.
+			if (lcOrdinal < gaOrdinal || lcOrdinal >= targetOrdinal) continue;
+			updateReleaseLifecycle(rd.getUuid(), targetLifecycle, wu);
+			bumped.add(rd.getUuid());
+		}
+		return bumped;
+	}
+
 	private void cascadeLifecycleToComponents(ReleaseData rd, ReleaseLifecycle newLifecycle, WhoUpdated wu, Set<UUID> visited) {
 		if (!visited.add(rd.getUuid())) return;
 		if (rd.getParentReleases() == null || rd.getParentReleases().isEmpty()) return;
